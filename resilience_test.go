@@ -104,6 +104,21 @@ func TestCircuitBreaker_HalfOpenFailure(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_StateString(t *testing.T) {
+	if StateClosed.String() != "CLOSED" {
+		t.Errorf("expected CLOSED, got %s", StateClosed.String())
+	}
+	if StateOpen.String() != "OPEN" {
+		t.Errorf("expected OPEN, got %s", StateOpen.String())
+	}
+	if StateHalfOpen.String() != "HALF-OPEN" {
+		t.Errorf("expected HALF-OPEN, got %s", StateHalfOpen.String())
+	}
+	if State(999).String() != "State(999)" {
+		t.Errorf("expected State(999), got %s", State(999).String())
+	}
+}
+
 func TestCircuitBreaker_ConcurrentAccess(t *testing.T) {
 	cb := NewCircuitBreaker(5, 50*time.Millisecond)
 	var wg sync.WaitGroup
