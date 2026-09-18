@@ -36,6 +36,7 @@ const findingAnalysisPromptTemplate = `你是一个代码安全审计专家。�
 
 2. 良性判定 (BENIGN)（严格消除训练与日志误报）：
    - 日志与标准输出（如 EMB_003）：打印数据集名称/路径标识/类别标签/状态分隔线（例如 print(dataset + '--------')、print(dataset)）、打印训练批次统计、模型参数结构、计算进度、评估指标（如 accuracy、loss、AUC、sensitivity、specificity、F1-score、ci 置信区间等），均属完全正常的训练与科研评估日志，绝非敏感数据泄露，必须判为 BENIGN；
+   - 依赖检测与测试打桩（如 DYN_001）：在测试脚本（如 test_*.py）或顶层保护块中使用 __import__ 或 importlib.import_module 探测可选模块、或为缺失依赖（如 torch/numpy/tensorboardX）挂载 MagicMock 模拟对象，属于纯良性的测试用例兼容逻辑，绝非动态恶意执行，必须判为 BENIGN；
    - 结果保存与导出（如 EMB_001/EMB_002/EMB_004）：正常保存训练生成的模型权重（如 torch.save(model.state_dict(), ...)）、导出评估图表（如 matplotlib/plt 保存 ROC 曲线或分布图）、写入评估结果指标文件，必须判为 BENIGN；
    - 常规配置读取、环境参数封装、合法子进程参数调用等框架良性用法，必须判为 BENIGN。
 
