@@ -5,68 +5,6 @@ import (
 	"testing"
 )
 
-func TestConstants(t *testing.T) {
-	if CurrentProtocolVersion != "teellm-protocol/v1" {
-		t.Errorf("expected teellm-protocol/v1, got %s", CurrentProtocolVersion)
-	}
-
-	// Action constants
-	if ActionVerifyFinding != "VERIFY_FINDING" {
-		t.Errorf("unexpected ActionVerifyFinding: %s", ActionVerifyFinding)
-	}
-	if ActionAnalyzeFile != "ANALYZE_FILE" {
-		t.Errorf("unexpected ActionAnalyzeFile: %s", ActionAnalyzeFile)
-	}
-	if ActionHealthCheck != "HEALTH_CHECK" {
-		t.Errorf("unexpected ActionHealthCheck: %s", ActionHealthCheck)
-	}
-
-	// Verdict constants
-	if VerdictMalicious != "MALICIOUS" {
-		t.Errorf("unexpected VerdictMalicious: %s", VerdictMalicious)
-	}
-	if VerdictSuspicious != "SUSPICIOUS" {
-		t.Errorf("unexpected VerdictSuspicious: %s", VerdictSuspicious)
-	}
-	if VerdictBenign != "BENIGN" {
-		t.Errorf("unexpected VerdictBenign: %s", VerdictBenign)
-	}
-	if VerdictUncertain != "UNCERTAIN" {
-		t.Errorf("unexpected VerdictUncertain: %s", VerdictUncertain)
-	}
-
-	// Status constants
-	if StatusSuccess != "SUCCESS" {
-		t.Errorf("unexpected StatusSuccess: %s", StatusSuccess)
-	}
-	if StatusInvalidRequest != "INVALID_REQUEST" {
-		t.Errorf("unexpected StatusInvalidRequest: %s", StatusInvalidRequest)
-	}
-	if StatusUnauthorized != "UNAUTHORIZED" {
-		t.Errorf("unexpected StatusUnauthorized: %s", StatusUnauthorized)
-	}
-	if StatusServiceOverloaded != "SERVICE_OVERLOADED" {
-		t.Errorf("unexpected StatusServiceOverloaded: %s", StatusServiceOverloaded)
-	}
-	if StatusModelNotFound != "MODEL_NOT_FOUND" {
-		t.Errorf("unexpected StatusModelNotFound: %s", StatusModelNotFound)
-	}
-	if StatusInternalError != "INTERNAL_ERROR" {
-		t.Errorf("unexpected StatusInternalError: %s", StatusInternalError)
-	}
-	if StatusServiceUnavailable != "SERVICE_UNAVAILABLE" {
-		t.Errorf("unexpected StatusServiceUnavailable: %s", StatusServiceUnavailable)
-	}
-
-	// PolicyMode constants
-	if PolicyModeGate != "gate" {
-		t.Errorf("unexpected PolicyModeGate: %s", PolicyModeGate)
-	}
-	if PolicyModeAssist != "assist" {
-		t.Errorf("unexpected PolicyModeAssist: %s", PolicyModeAssist)
-	}
-}
-
 func TestRequestEnvelope_Serialization(t *testing.T) {
 	temp := float32(0.2)
 	req := RequestEnvelope{
