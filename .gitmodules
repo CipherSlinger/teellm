@@ -1,0 +1,3 @@
+[submodule "teetls"]
+	path = teetls
+	url = https://github.com/CipherSlinger/teetls.git
