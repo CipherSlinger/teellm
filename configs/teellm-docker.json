@@ -1,0 +1,20 @@
+{
+  "server": {
+    "addr": ":8443",
+    "readTimeoutSeconds": 60,
+    "writeTimeoutSeconds": 60,
+    "maxResponseBytes": 1048576
+  },
+  "backend": {
+    "type": "ollama",
+    "endpoint": "http://127.0.0.1:11434",
+    "defaultModel": "qwen2.5-coder:3b",
+    "timeoutSeconds": 60
+  },
+  "attestation": {
+    "mode": "permissive",
+    "mock": false,
+    "hrkCertPath": "/root/taa/certs/hrk.cert",
+    "hskCekCertPath": "/root/taa/certs/hsk_cek.cert"
+  }
+}
