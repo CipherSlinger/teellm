@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"taa/teetls"
+	"github.com/CipherSlinger/teetls"
 )
 
 type mockBackend struct {

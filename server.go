@@ -9,7 +9,7 @@ import (
 	"net"
 	"net/http"
 
-	"taa/teetls"
+	"github.com/CipherSlinger/teetls"
 )
 
 // Backend defines the inference handler interface to be executed by the Server.

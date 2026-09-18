@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"taa/teetls"
+	"github.com/CipherSlinger/teetls"
 )
 
 var (
