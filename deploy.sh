@@ -335,7 +335,7 @@ ensure_local_docker_container() {
   fi
 
   # Mark manual flag to avoid port conflict from legacy image scripts
-  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "mkdir -p '$CON_WORKDIR' && touch '$CON_WORKDIR/manual'" >/dev/null 2>&1 || true
+  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "mkdir -p '$CON_WORKDIR' && touch '$CON_WORKDIR/manual-teellm'" >/dev/null 2>&1 || true
 }
 
 # ── Ollama Discovery, Binary Check & Artifact Resolver ─────────
@@ -829,9 +829,9 @@ if [[ "$ACTION" == "stop" ]]; then
   if [[ "$DEPLOY_DOCKER" == true ]]; then
     step "stopping teellm-service and ollama in container ($LOCAL_DOCKER_CONTAINER)"
     if docker ps --format '{{.Names}}' | grep -Eq "^${LOCAL_DOCKER_CONTAINER}\$"; then
-      docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pkill -x teellm-service >/dev/null 2>&1 || true; killall teellm-service >/dev/null 2>&1 || true; pkill -x ollama >/dev/null 2>&1 || true; killall ollama >/dev/null 2>&1 || true; pkill -x llama-server >/dev/null 2>&1 || true; killall llama-server >/dev/null 2>&1 || true" 2>/dev/null || true
+      docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "touch '$CON_WORKDIR/manual-teellm'; pkill -f '[s]tart-teellm\.sh' >/dev/null 2>&1 || true; pkill -x teellm-service >/dev/null 2>&1 || true; killall teellm-service >/dev/null 2>&1 || true; pkill -x ollama >/dev/null 2>&1 || true; killall ollama >/dev/null 2>&1 || true; pkill -x llama-server >/dev/null 2>&1 || true; killall llama-server >/dev/null 2>&1 || true" 2>/dev/null || true
       for _ in {1..20}; do
-        if ! docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pgrep -x teellm-service >/dev/null 2>&1 || pgrep -x ollama >/dev/null 2>&1"; then
+        if ! docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pgrep -f '[s]tart-teellm\.sh' >/dev/null 2>&1 || pgrep -x teellm-service >/dev/null 2>&1 || pgrep -x ollama >/dev/null 2>&1"; then
           break
         fi
         sleep 0.2
@@ -873,6 +873,7 @@ LOCAL_HSK_CERT="${cert_pair[1]:-}"
 build_local_binary() {
   step "building teellm-service from ./cmd/teellm-service"
   ensure_go_compiler
+  require_file "teellm supervisor script missing" "$PROJECT_DIR/deploy/start.sh"
   mkdir -p "$PROJECT_DIR/bin"
   spin_task "compiling teellm-service binary" go build -o "$PROJECT_DIR/bin/teellm-service" ./cmd/teellm-service
   require_file "build verification failed (teellm-service binary missing)" "$PROJECT_DIR/bin/teellm-service"
@@ -1046,26 +1047,35 @@ deploy_docker() {
   TEMP_CONFIG_FILE=""
   info "configuration deployed to $LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/configs/teellm-docker.json"
 
-  # Copy teellm-service binary
-  step "copying teellm-service binary into container"
+  # Copy teellm-service binary and supervisor script
+  step "copying teellm-service binary and supervisor script into container"
   docker cp "$PROJECT_DIR/bin/teellm-service" "$LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/teellm-service"
-  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "chmod +x '$CON_WORKDIR/teellm-service'"
-  info "binary deployed to $LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/teellm-service"
+  docker cp "$PROJECT_DIR/deploy/start.sh" "$LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/start-teellm.sh"
+  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "chmod +x '$CON_WORKDIR/teellm-service' '$CON_WORKDIR/start-teellm.sh'"
+  info "binary and supervisor deployed to $LOCAL_DOCKER_CONTAINER:$CON_WORKDIR"
 
-  # Stop old teellm-service
-  step "stopping previous teellm-service inside container"
-  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pkill -x teellm-service >/dev/null 2>&1 || true; killall teellm-service >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
-  for _ in {1..20}; do
-    if ! docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pgrep -x teellm-service >/dev/null 2>&1"; then
+  # Stop old teellm-service and daemon wrapper
+  step "stopping previous teellm-service and daemon wrapper inside container"
+  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "touch '$CON_WORKDIR/manual-teellm'; pkill -f '[s]tart-teellm\.sh' >/dev/null 2>&1 || true; pkill -x teellm-service >/dev/null 2>&1 || true; killall teellm-service >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+  local teellm_stopped=false
+  for _ in {1..30}; do
+    if ! docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pgrep -f '[s]tart-teellm\.sh' >/dev/null 2>&1 || pgrep -x teellm-service >/dev/null 2>&1"; then
+      teellm_stopped=true
       break
     fi
     sleep 0.2
   done
-  info "stopped previous teellm-service instances"
+  if [[ "$teellm_stopped" != true ]]; then
+    warn "teellm-service or start-teellm.sh did not terminate gracefully; force-killing"
+    docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "pkill -9 -f '[s]tart-teellm\.sh' >/dev/null 2>&1 || true; pkill -9 -x teellm-service >/dev/null 2>&1 || true; killall -9 teellm-service >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    sleep 0.5
+  fi
+  info "stopped previous teellm-service and daemon instances"
 
-  # Start teellm-service daemon
-  step "starting teellm-service on port :${TEELLM_PORT}"
-  docker exec -d "$LOCAL_DOCKER_CONTAINER" sh -lc "cd '$CON_WORKDIR' && exec nohup '$CON_WORKDIR/teellm-service' -config '$CON_WORKDIR/configs/teellm-docker.json' -model '$OLLAMA_MODEL' > '$TEELLM_LOG_FILE' 2>&1 &"
+  # Start teellm supervisor inside container
+  step "starting teellm supervisor inside container on port :${TEELLM_PORT}"
+  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "rm -f '$CON_WORKDIR/manual-teellm'"
+  docker exec -d "$LOCAL_DOCKER_CONTAINER" sh -lc "cd '$CON_WORKDIR' && nohup bash ./start-teellm.sh >/dev/null 2>&1 &"
 
   # Probe TEE-LLM readiness
   step "probing teellm-service readiness via TEE-TLS 1.3"
