@@ -42,7 +42,7 @@ ensure_ollama
 
 # Step 2: Supervise teellm-service
 while true; do
-  if [ -f ./manual ] || [ -f ./manual-teellm ]; then
+  if [ -f ./manual-teellm ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): manual mode active, teellm autostart paused" >> "$LOG"
     sleep 10
     continue
