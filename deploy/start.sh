@@ -11,6 +11,7 @@ TEEPID=""
 cleanup() {
   if [ -n "$TEEPID" ]; then
     kill -TERM "$TEEPID" 2>/dev/null || true
+    wait "$TEEPID" 2>/dev/null || true
   fi
   exit 0
 }
@@ -46,21 +47,24 @@ while true; do
     sleep 10
     continue
   fi
+
+  ensure_ollama
+
   if [ ! -x ./teellm-service ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): ./teellm-service not found, retry in 30s" >> "$LOG"
     sleep 30
     continue
   fi
 
-  CONFIG_ARG=""
+  CONFIG_ARGS=()
   if [ -f ./configs/teellm-docker.json ]; then
-    CONFIG_ARG="-config ./configs/teellm-docker.json"
+    CONFIG_ARGS=(-config ./configs/teellm-docker.json)
   elif [ -f ./teellm-docker.json ]; then
-    CONFIG_ARG="-config ./teellm-docker.json"
+    CONFIG_ARGS=(-config ./teellm-docker.json)
   fi
 
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): starting ./teellm-service ${CONFIG_ARG}" >> "$LOG"
-  ./teellm-service ${CONFIG_ARG} >> "$LOG" 2>&1 &
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): starting ./teellm-service ${CONFIG_ARGS[*]}" >> "$LOG"
+  ./teellm-service "${CONFIG_ARGS[@]}" >> "$LOG" 2>&1 &
   TEEPID=$!
   wait "$TEEPID"
   EXIT_CODE=$?
