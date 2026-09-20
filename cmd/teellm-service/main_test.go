@@ -21,7 +21,7 @@ func TestLoadServiceConfig(t *testing.T) {
 
 	content := `{
 		"server": {"addr": ":9443"},
-		"backend": {"endpoint": "http://127.0.0.1:11435", "defaultModel": "qwen2.5-coder:7b"},
+		"backend": {"endpoint": "http://127.0.0.1:11435", "defaultModel": "qwen2.5-coder:7b", "modelCatalogPath": "./configs/models.json"},
 		"attestation": {"mode": "strict", "mock": true}
 	}`
 	if _, err := tmpFile.WriteString(content); err != nil {
@@ -38,6 +38,9 @@ func TestLoadServiceConfig(t *testing.T) {
 	}
 	if cfg.Backend.DefaultModel != "qwen2.5-coder:7b" {
 		t.Errorf("expected model qwen2.5-coder:7b, got %s", cfg.Backend.DefaultModel)
+	}
+	if cfg.Backend.ModelCatalogPath != "./configs/models.json" {
+		t.Errorf("expected modelCatalogPath ./configs/models.json, got %s", cfg.Backend.ModelCatalogPath)
 	}
 	if cfg.Attestation.Mode != "strict" || !cfg.Attestation.Mock {
 		t.Errorf("expected strict mock attestation, got mode=%s mock=%v", cfg.Attestation.Mode, cfg.Attestation.Mock)

@@ -132,6 +132,21 @@ func LoadModelCatalog(path string) (*ModelCatalog, error) {
 	return &catalog, nil
 }
 
+// cloneModelProfile returns a copy of the profile with its Options map cloned defensively.
+func cloneModelProfile(p *ModelProfile) *ModelProfile {
+	if p == nil {
+		return nil
+	}
+	res := *p
+	if p.Options != nil {
+		res.Options = make(map[string]any, len(p.Options))
+		for k, v := range p.Options {
+			res.Options[k] = v
+		}
+	}
+	return &res
+}
+
 // GetProfile retrieves the profile for a given model name, or a default fallback.
 func (c *ModelCatalog) GetProfile(modelName string) *ModelProfile {
 	if c == nil {
@@ -148,13 +163,13 @@ func (c *ModelCatalog) GetProfile(modelName string) *ModelProfile {
 
 	trimmed := strings.TrimSpace(modelName)
 	if p, ok := c.Models[trimmed]; ok {
-		return &p
+		return cloneModelProfile(&p)
 	}
 
-	// Case/prefix insensitive match
+	// Case-insensitive match
 	for k, v := range c.Models {
 		if strings.EqualFold(k, trimmed) {
-			return &v
+			return cloneModelProfile(&v)
 		}
 	}
 

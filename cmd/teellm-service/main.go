@@ -25,10 +25,11 @@ type ServerConfigSection struct {
 
 // BackendConfigSection defines upstream LLM backend configuration.
 type BackendConfigSection struct {
-	Type           string `json:"type"`
-	Endpoint       string `json:"endpoint"`
-	DefaultModel   string `json:"defaultModel"`
-	TimeoutSeconds int    `json:"timeoutSeconds"`
+	Type             string `json:"type"`
+	Endpoint         string `json:"endpoint"`
+	DefaultModel     string `json:"defaultModel"`
+	TimeoutSeconds   int    `json:"timeoutSeconds"`
+	ModelCatalogPath string `json:"modelCatalogPath,omitempty"`
 }
 
 // AttestationConfigSection defines TEE hardware and attestation policy configuration.
@@ -206,10 +207,18 @@ func main() {
 		backendTimeout = 60 * time.Second
 	}
 
+	catalog, err := teellm.LoadModelCatalog(cfg.Backend.ModelCatalogPath)
+	if err != nil {
+		log.Printf("warning: could not load model catalog from %q: %v (using defaults)", cfg.Backend.ModelCatalogPath, err)
+	} else {
+		log.Printf("loaded model catalog from %s (activeModel=%s, registered=%d)", cfg.Backend.ModelCatalogPath, catalog.ActiveModel, len(catalog.Models))
+	}
+
 	backend, err := teellm.NewOllamaBackend(teellm.OllamaBackendConfig{
 		Endpoint:     cfg.Backend.Endpoint,
 		DefaultModel: cfg.Backend.DefaultModel,
 		Timeout:      backendTimeout,
+		Catalog:      catalog,
 	})
 	if err != nil {
 		log.Fatalf("failed to initialize Ollama backend: %v", err)

@@ -58,6 +58,7 @@ type OllamaBackendConfig struct {
 	DefaultModel string
 	Timeout      time.Duration
 	HTTPClient   *http.Client
+	Catalog      *ModelCatalog
 }
 
 // OllamaBackend implements teellm.Backend by dispatching prompts to an Ollama server.
@@ -65,6 +66,7 @@ type OllamaBackend struct {
 	endpoint     string
 	defaultModel string
 	client       *http.Client
+	catalog      *ModelCatalog
 }
 
 var _ Backend = (*OllamaBackend)(nil)
@@ -93,10 +95,16 @@ func NewOllamaBackend(cfg OllamaBackendConfig) (*OllamaBackend, error) {
 		}
 	}
 
+	catalog := cfg.Catalog
+	if catalog == nil {
+		catalog = DefaultModelCatalog()
+	}
+
 	return &OllamaBackend{
 		endpoint:     endpoint,
 		defaultModel: model,
 		client:       client,
+		catalog:      catalog,
 	}, nil
 }
 
@@ -164,14 +172,29 @@ func (b *OllamaBackend) HandleVerifyFinding(ctx context.Context, req *RequestEnv
 		model = strings.TrimSpace(req.ModelRef.Name)
 	}
 
+	genOptions := map[string]any{
+		"temperature": 0.1,
+		"num_predict": 200,
+	}
+	if b.catalog != nil {
+		if profile := b.catalog.GetProfile(model); profile != nil && len(profile.Options) > 0 {
+			for k, v := range profile.Options {
+				genOptions[k] = v
+			}
+		}
+	}
+	if req.Policy.Temperature != nil {
+		genOptions["temperature"] = *req.Policy.Temperature
+	}
+	if req.Policy.MaxCompletionTokens > 0 {
+		genOptions["num_predict"] = req.Policy.MaxCompletionTokens
+	}
+
 	ollamaReqBody := ollamaGenerateReq{
-		Model:  model,
-		Prompt: prompt,
-		Stream: false,
-		Options: map[string]any{
-			"temperature": 0.1,
-			"num_predict": 160,
-		},
+		Model:   model,
+		Prompt:  prompt,
+		Stream:  false,
+		Options: genOptions,
 	}
 
 	reqBytes, err := json.Marshal(ollamaReqBody)

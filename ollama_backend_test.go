@@ -152,3 +152,69 @@ func TestOllamaBackend_HandleVerifyFinding(t *testing.T) {
 		}
 	})
 }
+
+func TestOllamaBackend_CatalogOptionsMerged(t *testing.T) {
+	var capturedBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/generate" {
+			_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"response": "{\"verdict\":\"BENIGN\",\"reason\":\"ok\"}"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	catalog := &ModelCatalog{
+		Models: map[string]ModelProfile{
+			"qwen3:8b": {
+				Options: map[string]any{
+					"num_ctx": float64(4096),
+					"think":   false,
+				},
+			},
+		},
+	}
+
+	b, err := NewOllamaBackend(OllamaBackendConfig{
+		Endpoint:     server.URL,
+		DefaultModel: "qwen3:8b",
+		Catalog:      catalog,
+	})
+	if err != nil {
+		t.Fatalf("failed to create backend: %v", err)
+	}
+
+	req := &RequestEnvelope{
+		RequestID: "req-cat-1",
+		ModelRef: &ModelReference{
+			Name: "qwen3:8b",
+		},
+		FindingPayload: &FindingPayload{
+			RuleID: "RULE_01",
+			Target: CodeTarget{
+				FilePath: "test.py",
+				Line:     10,
+			},
+		},
+	}
+
+	_, err = b.HandleVerifyFinding(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	options, ok := capturedBody["options"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected options map in request body, got %v", capturedBody["options"])
+	}
+
+	if options["num_ctx"] != float64(4096) {
+		t.Errorf("expected num_ctx=4096, got %v", options["num_ctx"])
+	}
+	if options["think"] != false {
+		t.Errorf("expected think=false, got %v", options["think"])
+	}
+}
