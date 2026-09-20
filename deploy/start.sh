@@ -4,7 +4,7 @@
 set -u
 cd /root/taa || exit 1
 LOG=/root/taa/teellm-service.log
-OLLAMA_DIR="/root/taa/ollama-qwen"
+OLLAMA_DIR="${OLLAMA_DIR:-/root/taa/ollama}"
 OLLAMA_HOST="127.0.0.1:11434"
 TEEPID=""
 

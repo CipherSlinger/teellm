@@ -217,7 +217,7 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Docker runtime settings
 LOCAL_DOCKER_CONTAINER="${LOCAL_DOCKER_CONTAINER:-taa-env-slim-v2}"
 CON_WORKDIR="${CON_WORKDIR:-/root/taa}"
-CONTAINER_OLLAMA_DIR="${CONTAINER_OLLAMA_DIR:-/root/taa/ollama-qwen}"
+CONTAINER_OLLAMA_DIR="${CONTAINER_OLLAMA_DIR:-/root/taa/ollama}"
 
 # TEE-LLM and Ollama ports & endpoints
 TEELLM_PORT="${TEELLM_PORT:-8443}"
@@ -349,15 +349,15 @@ resolve_ollama_local_dir() {
     printf '%s' "$CLI_OLLAMA_DIR"
     return 0
   fi
-  if [[ -d "$PROJECT_DIR/../models/audit/ollama-qwen" ]]; then
-    printf '%s' "$PROJECT_DIR/../models/audit/ollama-qwen"
+  if [[ -d "$PROJECT_DIR/models/ollama" ]]; then
+    printf '%s' "$PROJECT_DIR/models/ollama"
     return 0
   fi
-  if [[ -d "$PROJECT_DIR/models/ollama-qwen" ]]; then
-    printf '%s' "$PROJECT_DIR/models/ollama-qwen"
+  if [[ -d "$PROJECT_DIR/models" ]]; then
+    printf '%s' "$PROJECT_DIR/models"
     return 0
   fi
-  printf '%s' "$PROJECT_DIR/../models/audit/ollama-qwen"
+  printf '%s' "$PROJECT_DIR/models/ollama"
 }
 
 verify_ollama_binary() {
@@ -584,13 +584,499 @@ with open(output_path, "w", encoding="utf-8") as f:
 PY
 }
 
+# ── Models Management Command ─────────────────────────────────
+
+show_models_usage() {
+  cat <<EOF
+Usage: $(basename "$0") models <command> [options]
+
+Manage offline LLM models, inspect readiness, and switch active profiles.
+
+Commands:
+  list                 List available models with profile details and readiness.
+  info <model>         Display detailed profile and verify all blob artifacts.
+  switch <model>       Verify readiness and atomically switch active model.
+  help                 Display this models help documentation.
+
+Options:
+  --ollama-dir <path>  Specify local directory containing offline Ollama bundle.
+  -h, --help           Display this help documentation.
+
+Examples:
+  $(basename "$0") models list
+  $(basename "$0") models info qwen2.5-coder:3b
+  $(basename "$0") models switch qwen2.5-coder:3b
+EOF
+}
+
+handle_models_command() {
+  local target_ollama_dir=""
+  local subcmd=""
+  local model_arg=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ollama-dir=*)
+        target_ollama_dir="${1#*=}"
+        ;;
+      --ollama-dir)
+        shift
+        if [[ $# -eq 0 || "$1" == -* ]]; then
+          err "--ollama-dir requires a directory path argument"
+          exit 1
+        fi
+        target_ollama_dir="$1"
+        ;;
+      -h|--help)
+        show_models_usage
+        return 0
+        ;;
+      list|info|switch|help)
+        if [[ -z "$subcmd" ]]; then
+          subcmd="$1"
+        elif [[ -z "$model_arg" ]]; then
+          model_arg="$1"
+        fi
+        ;;
+      *)
+        if [[ -z "$subcmd" ]]; then
+          subcmd="$1"
+        elif [[ -z "$model_arg" ]]; then
+          model_arg="$1"
+        else
+          err "unexpected argument: $1"
+          show_models_usage >&2
+          exit 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [[ -z "$subcmd" || "$subcmd" == "help" ]]; then
+    show_models_usage
+    return 0
+  fi
+
+  if [[ -z "$target_ollama_dir" ]]; then
+    target_ollama_dir="$(resolve_ollama_local_dir)"
+  fi
+
+  require_command python3
+
+  case "$subcmd" in
+    list)
+      python3 - "$target_ollama_dir" "$PROJECT_DIR" <<'PY'
+import os, sys, json
+
+ollama_dir = sys.argv[1]
+project_dir = sys.argv[2]
+models_json_path = os.path.join(project_dir, "configs", "models.json")
+docker_cfg_path = os.path.join(project_dir, "configs", "teellm-docker.json")
+prod_cfg_path = os.path.join(project_dir, "configs", "teellm-production.json")
+
+catalog_data = {}
+active_model = ""
+if os.path.isfile(models_json_path):
+    try:
+        with open(models_json_path, "r", encoding="utf-8") as f:
+            catalog_data = json.load(f)
+            active_model = catalog_data.get("activeModel", "")
+    except Exception:
+        pass
+
+if not active_model and os.path.isfile(docker_cfg_path):
+    try:
+        with open(docker_cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+            active_model = cfg.get("backend", {}).get("defaultModel", "")
+    except Exception:
+        pass
+
+if not active_model and os.path.isfile(prod_cfg_path):
+    try:
+        with open(prod_cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+            active_model = cfg.get("backend", {}).get("defaultModel", "")
+    except Exception:
+        pass
+
+manifests_dir = os.path.join(ollama_dir, "models", "models", "manifests")
+blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
+
+discovered_manifests = {}
+if os.path.isdir(manifests_dir):
+    for root, dirs, files in os.walk(manifests_dir):
+        for f in files:
+            mpath = os.path.join(root, f)
+            rel = os.path.relpath(mpath, manifests_dir)
+            parts = rel.split(os.sep)
+            if parts and parts[0] == "registry.ollama.ai":
+                parts = parts[1:]
+            if parts and parts[0] == "library":
+                parts = parts[1:]
+            if len(parts) >= 2:
+                model_id = f"{'/'.join(parts[:-1])}:{parts[-1]}"
+            elif len(parts) == 1:
+                model_id = parts[0]
+            else:
+                continue
+            discovered_manifests[model_id] = mpath
+
+all_model_ids = []
+if "models" in catalog_data and isinstance(catalog_data["models"], dict):
+    for mid in catalog_data["models"].keys():
+        if mid not in all_model_ids:
+            all_model_ids.append(mid)
+
+for mid in sorted(discovered_manifests.keys()):
+    if mid not in all_model_ids:
+        all_model_ids.append(mid)
+
+rows = []
+for mid in all_model_ids:
+    profile = catalog_data.get("models", {}).get(mid, {})
+    family = profile.get("family", "")
+    if not family:
+        family = mid.split(":")[0] if ":" in mid else mid
+    params = profile.get("parameterSize", "-")
+    ctx = str(profile.get("options", {}).get("num_ctx", "-"))
+
+    mpath = discovered_manifests.get(mid)
+    disk_size_str = "-"
+    status = "not found"
+
+    if not mpath and os.path.isdir(manifests_dir):
+        if ":" in mid:
+            bname, tag = mid.split(":", 1)
+        else:
+            bname, tag = mid, "latest"
+        parts = bname.split("/")
+        candidate = os.path.join(manifests_dir, "registry.ollama.ai", "library", parts[0], tag)
+        if os.path.isfile(candidate):
+            mpath = candidate
+
+    if mpath and os.path.isfile(mpath):
+        try:
+            with open(mpath, "r", encoding="utf-8") as fp:
+                mdata = json.load(fp)
+            blobs = []
+            if "config" in mdata and "digest" in mdata["config"]:
+                blobs.append(mdata["config"]["digest"].replace(":", "-"))
+            for layer in mdata.get("layers", []):
+                if "digest" in layer:
+                    blobs.append(layer["digest"].replace(":", "-"))
+            blobs = sorted(list(set(blobs)))
+
+            missing_count = 0
+            total_bytes = 0
+            for b in blobs:
+                bp = os.path.join(blobs_dir, b)
+                if os.path.isfile(bp):
+                    total_bytes += os.path.getsize(bp)
+                else:
+                    missing_count += 1
+
+            if total_bytes >= 1024 * 1024 * 1024:
+                disk_size_str = f"{total_bytes / (1024 * 1024 * 1024):.2f} GB"
+            elif total_bytes > 0:
+                disk_size_str = f"{total_bytes / (1024 * 1024):.2f} MB"
+            else:
+                disk_size_str = "0 MB"
+
+            if missing_count == 0 and len(blobs) > 0:
+                status = "ready"
+            elif missing_count > 0:
+                status = f"missing {missing_count}b"
+            else:
+                status = "empty"
+        except Exception:
+            status = "corrupted"
+
+    is_active = (mid == active_model)
+    active_str = "* (active)" if is_active else ""
+    rows.append((mid, family, params, disk_size_str, ctx, status, active_str))
+
+headers = ["MODEL", "FAMILY", "PARAMS", "DISK SIZE", "CTX", "STATUS", "ACTIVE"]
+col_widths = [len(h) for h in headers]
+for row in rows:
+    for i, val in enumerate(row):
+        col_widths[i] = max(col_widths[i], len(val))
+
+header_line = " | ".join(f"{headers[i]:<{col_widths[i]}}" for i in range(len(headers)))
+sep_line = "-+-".join("-" * col_widths[i] for i in range(len(headers)))
+print(header_line)
+print(sep_line)
+for row in rows:
+    row_line = " | ".join(f"{row[i]:<{col_widths[i]}}" for i in range(len(headers)))
+    print(row_line)
+PY
+      ;;
+    info)
+      if [[ -z "$model_arg" ]]; then
+        err "model name argument is required for 'models info'"
+        show_models_usage >&2
+        exit 1
+      fi
+      local info_output=""
+      local info_rc=0
+      info_output=$(python3 - "$target_ollama_dir" "$PROJECT_DIR" "$model_arg" 2>&1 <<'PY'
+import os, sys, json
+
+ollama_dir = sys.argv[1]
+project_dir = sys.argv[2]
+model_name = sys.argv[3]
+
+models_json_path = os.path.join(project_dir, "configs", "models.json")
+catalog_data = {}
+if os.path.isfile(models_json_path):
+    try:
+        with open(models_json_path, "r", encoding="utf-8") as f:
+            catalog_data = json.load(f)
+    except Exception:
+        pass
+
+if ":" in model_name:
+    base_name, tag = model_name.split(":", 1)
+else:
+    base_name, tag = model_name, "latest"
+
+parts = base_name.split("/")
+manifests_root = os.path.join(ollama_dir, "models", "models", "manifests")
+manifest_rel = None
+manifest_full = None
+
+std_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
+std_full = os.path.join(ollama_dir, std_rel)
+if os.path.isfile(std_full):
+    manifest_rel = std_rel
+    manifest_full = std_full
+else:
+    if os.path.isdir(manifests_root):
+        for root, dirs, files in os.walk(manifests_root):
+            for f in files:
+                if f == tag and os.path.basename(root) == parts[-1]:
+                    manifest_full = os.path.join(root, f)
+                    manifest_rel = os.path.relpath(manifest_full, ollama_dir)
+                    break
+            if manifest_full:
+                break
+
+profile = catalog_data.get("models", {}).get(model_name)
+print(f"Model: {model_name}")
+if profile:
+    family = profile.get("family", "-")
+    param_size = profile.get("parameterSize", "-")
+    rec_ram = str(profile.get("recommendedRamGB", "-"))
+    if rec_ram != "-":
+        rec_ram += " GB"
+    timeout_val = str(profile.get("timeoutSeconds", "-"))
+    if timeout_val != "-":
+        timeout_val += "s"
+    ctx = str(profile.get("options", {}).get("num_ctx", "-"))
+    desc = profile.get("description", "")
+
+    print(f"  Family:           {family}")
+    print(f"  Parameter Size:   {param_size}")
+    print(f"  Recommended RAM:  {rec_ram}")
+    print(f"  Timeout:          {timeout_val}")
+    print(f"  Context Window:   {ctx}")
+    if desc:
+        print(f"  Description:      {desc}")
+    if "options" in profile and profile["options"]:
+        print("  Runtime Options:")
+        for k, v in profile["options"].items():
+            print(f"    {k}: {v}")
+else:
+    print("  Profile:          (No profile configured in configs/models.json)")
+
+print("")
+print("Storage & Artifacts:")
+if not manifest_full or not os.path.isfile(manifest_full):
+    print(f"  Manifest:         Not found on disk ({std_rel})")
+    print(f"  Status:           Error: Manifest not found for model '{model_name}'")
+    sys.exit(1)
+
+print(f"  Manifest:         {manifest_rel}")
+
+with open(manifest_full, "r", encoding="utf-8") as fp:
+    mdata = json.load(fp)
+
+blobs = []
+if "config" in mdata and "digest" in mdata["config"]:
+    blobs.append(("config", mdata["config"]["digest"].replace(":", "-")))
+for layer in mdata.get("layers", []):
+    if "digest" in layer:
+        media_type = layer.get("mediaType", "layer").split(".")[-1]
+        blobs.append((media_type, layer["digest"].replace(":", "-")))
+
+blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
+verified_blobs = 0
+total_bytes = 0
+missing_blobs = []
+
+print("  Blobs:")
+for btype, bdigest in blobs:
+    bpath = os.path.join(blobs_dir, bdigest)
+    if os.path.isfile(bpath):
+        size = os.path.getsize(bpath)
+        total_bytes += size
+        verified_blobs += 1
+        if size >= 1024 * 1024:
+            s_str = f"{size / (1024 * 1024):.2f} MB"
+        else:
+            s_str = f"{size} B"
+        print(f"    - {bdigest[:19]}... ({btype}, {s_str}) [OK]")
+    else:
+        missing_blobs.append(bdigest)
+        print(f"    - {bdigest[:19]}... ({btype}) [MISSING]")
+
+mb_str = f"{total_bytes / (1024 * 1024):.2f} MB"
+if missing_blobs:
+    print(f"  Status:           Incomplete: {len(missing_blobs)}/{len(blobs)} blobs missing on disk")
+    sys.exit(1)
+else:
+    print(f"  Status:           Ready: All {len(blobs)} blobs present on disk ({mb_str})")
+PY
+      ) || info_rc=$?
+
+      echo "$info_output"
+      if [[ $info_rc -ne 0 ]]; then
+        exit $info_rc
+      fi
+      ;;
+    switch)
+      if [[ -z "$model_arg" ]]; then
+        err "model name argument is required for 'models switch'"
+        show_models_usage >&2
+        exit 1
+      fi
+      local switch_err=""
+      if ! switch_err=$(python3 - "$target_ollama_dir" "$PROJECT_DIR" "$model_arg" 2>&1 <<'PY'
+import os, sys, json
+
+ollama_dir = sys.argv[1]
+project_dir = sys.argv[2]
+model_name = sys.argv[3]
+
+if ":" in model_name:
+    base_name, tag = model_name.split(":", 1)
+else:
+    base_name, tag = model_name, "latest"
+
+parts = base_name.split("/")
+manifests_root = os.path.join(ollama_dir, "models", "models", "manifests")
+manifest_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
+manifest_full = os.path.join(ollama_dir, manifest_rel)
+
+if not os.path.isfile(manifest_full):
+    if os.path.isdir(manifests_root):
+        for root, dirs, files in os.walk(manifests_root):
+            for f in files:
+                if f == tag and os.path.basename(root) == parts[-1]:
+                    manifest_full = os.path.join(root, f)
+                    manifest_rel = os.path.relpath(manifest_full, ollama_dir)
+                    break
+            if os.path.isfile(manifest_full):
+                break
+
+if not manifest_full or not os.path.isfile(manifest_full):
+    sys.stderr.write(f"model manifest not found on disk ({manifest_rel})\n")
+    sys.exit(1)
+
+with open(manifest_full, "r", encoding="utf-8") as fp:
+    mdata = json.load(fp)
+
+blobs = []
+if "config" in mdata and "digest" in mdata["config"]:
+    blobs.append(mdata["config"]["digest"].replace(":", "-"))
+for layer in mdata.get("layers", []):
+    if "digest" in layer:
+        blobs.append(layer["digest"].replace(":", "-"))
+
+blobs = sorted(list(set(blobs)))
+blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
+missing = []
+for b in blobs:
+    if not os.path.isfile(os.path.join(blobs_dir, b)):
+        missing.append(b)
+
+if missing:
+    sys.stderr.write(f"model has {len(missing)} missing blob(s) on disk\n")
+    sys.exit(1)
+
+def atomic_update_json(filepath, updater):
+    if not os.path.isfile(filepath):
+        return False
+    dir_name = os.path.dirname(filepath)
+    base_name = os.path.basename(filepath)
+    tmp_path = os.path.join(dir_name, f".{base_name}.tmp.{os.getpid()}")
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    updater(data)
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp_path, filepath)
+    return True
+
+models_json = os.path.join(project_dir, "configs", "models.json")
+docker_json = os.path.join(project_dir, "configs", "teellm-docker.json")
+prod_json = os.path.join(project_dir, "configs", "teellm-production.json")
+
+def update_models(d):
+    d["activeModel"] = model_name
+
+def update_cfg(d):
+    d.setdefault("backend", {})["defaultModel"] = model_name
+
+if not atomic_update_json(models_json, update_models):
+    sys.stderr.write(f"warning: {models_json} not found or not updated\n")
+if not atomic_update_json(docker_json, update_cfg):
+    sys.stderr.write(f"warning: {docker_json} not found or not updated\n")
+if not atomic_update_json(prod_json, update_cfg):
+    sys.stderr.write(f"warning: {prod_json} not found or not updated\n")
+
+print("SUCCESS")
+PY
+); then
+        err "failed to switch active model to '$model_arg'"
+        if [[ -n "$switch_err" ]]; then
+          detail "$switch_err"
+        fi
+        exit 1
+      fi
+
+      info "Active model successfully switched to: ${BOLD}$model_arg${NC}"
+      detail "configs/models.json -> activeModel: $model_arg"
+      detail "configs/teellm-docker.json -> backend.defaultModel: $model_arg"
+      detail "configs/teellm-production.json -> backend.defaultModel: $model_arg"
+      echo ""
+      echo -e "${BOLD}Next steps to deploy with ${model_arg}:${NC}"
+      echo "  Deploy to local Docker:      ./deploy.sh docker start"
+      echo "  Deploy to remote Kubernetes: ./deploy.sh remote start"
+      ;;
+    *)
+      err "unknown models subcommand: $subcmd"
+      show_models_usage >&2
+      exit 1
+      ;;
+  esac
+}
+
 # ── CLI Usage and Options Parsing ─────────────────────────────
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [docker|remote] [start|stop|probe] [options]
+       $(basename "$0") models [list|info|switch] [args]
 
 Deploy and manage standalone TEE-LLM inference service and offline Ollama runtime.
+
+Model Management Commands:
+  models list                  List available models and active selection.
+  models info <model>          Display detailed profile and blob readiness for a model.
+  models switch <model>        Verify and switch active model across configurations.
 
 Targets:
   docker       Deploy to local Docker container (default, container: $LOCAL_DOCKER_CONTAINER).
@@ -643,6 +1129,9 @@ Environment overrides:
 
 Examples:
   $(basename "$0")
+  $(basename "$0") models list
+  $(basename "$0") models info qwen2.5-coder:3b
+  $(basename "$0") models switch qwen2.5-coder:3b
   $(basename "$0") docker start
   $(basename "$0") docker start --model qwen2.5-coder:7b
   $(basename "$0") docker stop
@@ -665,6 +1154,11 @@ CLI_CONFIG=""
 while [[ $# -gt 0 ]]; do
   arg="$1"
   case "$arg" in
+    models)
+      shift
+      handle_models_command "$@"
+      exit 0
+      ;;
     docker)
       DEPLOY_DOCKER=true
       ;;
