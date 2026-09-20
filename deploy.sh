@@ -36,6 +36,7 @@ LAST_ERR_LINE=""
 LAST_ERR_CMD=""
 TEMP_FILELIST=""
 TEMP_CONFIG_FILE=""
+TRAP_SUPPRESS_DEPLOYMENT_BANNER=false
 STEP=0
 
 cursor_hide() { [[ "$IS_TTY" == true ]] && printf "\033[?25l" 2>/dev/null || true; }
@@ -62,7 +63,7 @@ cleanup_display() {
     rm -f "$TEMP_CONFIG_FILE" 2>/dev/null || true
   fi
 
-  if [[ $exit_code -ne 0 ]]; then
+  if [[ $exit_code -ne 0 && "${TRAP_SUPPRESS_DEPLOYMENT_BANNER:-false}" != "true" ]]; then
     echo "" >&2
     echo -e "${RED}╭──────────────────────────────────────────────────────────────────╮${NC}" >&2
     echo -e "${RED}│${NC}  ${BOLD}${RED}Deployment Terminated with Error (exit code: ${exit_code})${NC}" >&2
@@ -353,10 +354,6 @@ resolve_ollama_local_dir() {
     printf '%s' "$PROJECT_DIR/models/ollama"
     return 0
   fi
-  if [[ -d "$PROJECT_DIR/models" ]]; then
-    printf '%s' "$PROJECT_DIR/models"
-    return 0
-  fi
   printf '%s' "$PROJECT_DIR/models/ollama"
 }
 
@@ -400,12 +397,17 @@ resolve_ollama_model_artifacts() {
   local dest_prefix="${4:-}"
   require_command python3
   python3 - "$dir" "$model" "$mode" "$dest_prefix" <<'PY'
-import os, sys, json
+import os, sys, json, re
 
 ollama_dir = sys.argv[1]
 model_name = sys.argv[2]
 mode = sys.argv[3] if len(sys.argv) > 3 else "full"
 dest_prefix = sys.argv[4] if len(sys.argv) > 4 else ""
+
+MODEL_NAME_PATTERN = r'^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*(:[a-zA-Z0-9_.-]+)?$'
+if not re.match(MODEL_NAME_PATTERN, model_name):
+    sys.stderr.write(f"error: invalid model name format: {model_name}\n")
+    sys.exit(1)
 
 if ":" in model_name:
     base_name, tag = model_name.split(":", 1)
@@ -413,6 +415,7 @@ else:
     base_name, tag = model_name, "latest"
 
 parts = base_name.split("/")
+manifests_root = os.path.join(ollama_dir, "models", "models", "manifests")
 if len(parts) == 1:
     manifest_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
 elif len(parts) == 2:
@@ -421,23 +424,35 @@ else:
     manifest_rel = os.path.join("models", "models", "manifests", *parts, tag)
 
 manifest_full = os.path.join(ollama_dir, manifest_rel)
+manifests_root_real = os.path.realpath(manifests_root)
+manifest_real = os.path.realpath(manifest_full)
+if not (manifest_real == manifests_root_real or manifest_real.startswith(manifests_root_real + os.sep)):
+    sys.stderr.write(f"error: directory traversal detected: {model_name}\n")
+    sys.exit(1)
+
 if not os.path.isfile(manifest_full):
     candidates = []
-    manifests_root = os.path.join(ollama_dir, "models", "models", "manifests")
     if os.path.isdir(manifests_root):
         for root, dirs, files in os.walk(manifests_root):
             for f in files:
                 if f == tag and os.path.basename(root) == parts[-1]:
-                    candidates.append(os.path.relpath(os.path.join(root, f), ollama_dir))
+                    cand = os.path.join(root, f)
+                    cand_real = os.path.realpath(cand)
+                    if cand_real == manifests_root_real or cand_real.startswith(manifests_root_real + os.sep):
+                        candidates.append(os.path.relpath(cand, ollama_dir))
     if candidates:
         manifest_rel = candidates[0]
         manifest_full = os.path.join(ollama_dir, manifest_rel)
     else:
-        sys.stderr.write(f"Error: model '{model_name}' manifest not found at {manifest_full}\n")
+        sys.stderr.write(f"error: model '{model_name}' manifest not found at {manifest_full}\n")
         sys.exit(1)
 
-with open(manifest_full, "r", encoding="utf-8") as fp:
-    data = json.load(fp)
+try:
+    with open(manifest_full, "r", encoding="utf-8") as fp:
+        data = json.load(fp)
+except (json.JSONDecodeError, OSError) as e:
+    sys.stderr.write(f"error: failed to parse manifest '{manifest_full}': {e}\n")
+    sys.exit(1)
 
 blobs = []
 if "config" in data and "digest" in data["config"]:
@@ -447,13 +462,21 @@ for layer in data.get("layers", []):
         blobs.append(layer["digest"].replace(":", "-"))
 
 blobs = sorted(list(set(blobs)))
+if not blobs:
+    sys.stderr.write(f"error: model '{model_name}' manifest contains no layers or blobs\n")
+    sys.exit(1)
+
 blob_rel_paths = []
 weight_bytes = 0
+blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
 for b in blobs:
+    if not re.match(r"^sha256-[a-f0-9]{64}$", b):
+        sys.stderr.write(f"error: invalid blob digest format: {b}\n")
+        sys.exit(1)
     p = os.path.join("models", "models", "blobs", b)
     full_p = os.path.join(ollama_dir, p)
     if not os.path.isfile(full_p):
-        sys.stderr.write(f"Error: missing required blob for model '{model_name}': {full_p}\n")
+        sys.stderr.write(f"error: missing required blob for model '{model_name}': {full_p}\n")
         sys.exit(1)
     blob_rel_paths.append(p)
     weight_bytes += os.path.getsize(full_p)
@@ -610,6 +633,7 @@ EOF
 }
 
 handle_models_command() {
+  TRAP_SUPPRESS_DEPLOYMENT_BANNER=true
   local target_ollama_dir=""
   local subcmd=""
   local model_arg=""
@@ -667,7 +691,7 @@ handle_models_command() {
   case "$subcmd" in
     list)
       python3 - "$target_ollama_dir" "$PROJECT_DIR" <<'PY'
-import os, sys, json
+import os, sys, json, re
 
 ollama_dir = sys.argv[1]
 project_dir = sys.argv[2]
@@ -752,7 +776,12 @@ for mid in all_model_ids:
         else:
             bname, tag = mid, "latest"
         parts = bname.split("/")
-        candidate = os.path.join(manifests_dir, "registry.ollama.ai", "library", parts[0], tag)
+        if len(parts) == 1:
+            candidate = os.path.join(manifests_dir, "registry.ollama.ai", "library", parts[0], tag)
+        elif len(parts) == 2:
+            candidate = os.path.join(manifests_dir, "registry.ollama.ai", parts[0], parts[1], tag)
+        else:
+            candidate = os.path.join(manifests_dir, *parts, tag)
         if os.path.isfile(candidate):
             mpath = candidate
 
@@ -771,6 +800,9 @@ for mid in all_model_ids:
             missing_count = 0
             total_bytes = 0
             for b in blobs:
+                if not re.match(r"^sha256-[a-f0-9]{64}$", b):
+                    missing_count += 1
+                    continue
                 bp = os.path.join(blobs_dir, b)
                 if os.path.isfile(bp):
                     total_bytes += os.path.getsize(bp)
@@ -818,14 +850,18 @@ PY
         show_models_usage >&2
         exit 1
       fi
-      local info_output=""
       local info_rc=0
-      info_output=$(python3 - "$target_ollama_dir" "$PROJECT_DIR" "$model_arg" 2>&1 <<'PY'
-import os, sys, json
+      python3 - "$target_ollama_dir" "$PROJECT_DIR" "$model_arg" <<'PY' || info_rc=$?
+import os, sys, json, re
 
 ollama_dir = sys.argv[1]
 project_dir = sys.argv[2]
 model_name = sys.argv[3]
+
+MODEL_NAME_PATTERN = r'^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*(:[a-zA-Z0-9_.-]+)?$'
+if not re.match(MODEL_NAME_PATTERN, model_name):
+    sys.stderr.write(f"error: invalid model name format: {model_name}\n")
+    sys.exit(1)
 
 models_json_path = os.path.join(project_dir, "configs", "models.json")
 catalog_data = {}
@@ -843,23 +879,34 @@ else:
 
 parts = base_name.split("/")
 manifests_root = os.path.join(ollama_dir, "models", "models", "manifests")
-manifest_rel = None
-manifest_full = None
-
-std_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
-std_full = os.path.join(ollama_dir, std_rel)
-if os.path.isfile(std_full):
-    manifest_rel = std_rel
-    manifest_full = std_full
+if len(parts) == 1:
+    std_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
+elif len(parts) == 2:
+    std_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", parts[0], parts[1], tag)
 else:
+    std_rel = os.path.join("models", "models", "manifests", *parts, tag)
+
+manifest_rel = std_rel
+manifest_full = os.path.join(ollama_dir, std_rel)
+
+manifests_root_real = os.path.realpath(manifests_root)
+manifest_real = os.path.realpath(manifest_full)
+if not (manifest_real == manifests_root_real or manifest_real.startswith(manifests_root_real + os.sep)):
+    sys.stderr.write(f"error: directory traversal detected: {model_name}\n")
+    sys.exit(1)
+
+if not os.path.isfile(manifest_full):
     if os.path.isdir(manifests_root):
         for root, dirs, files in os.walk(manifests_root):
             for f in files:
                 if f == tag and os.path.basename(root) == parts[-1]:
-                    manifest_full = os.path.join(root, f)
-                    manifest_rel = os.path.relpath(manifest_full, ollama_dir)
-                    break
-            if manifest_full:
+                    cand = os.path.join(root, f)
+                    cand_real = os.path.realpath(cand)
+                    if cand_real == manifests_root_real or cand_real.startswith(manifests_root_real + os.sep):
+                        manifest_full = cand
+                        manifest_rel = os.path.relpath(manifest_full, ollama_dir)
+                        break
+            if manifest_full and os.path.isfile(manifest_full):
                 break
 
 profile = catalog_data.get("models", {}).get(model_name)
@@ -899,8 +946,12 @@ if not manifest_full or not os.path.isfile(manifest_full):
 
 print(f"  Manifest:         {manifest_rel}")
 
-with open(manifest_full, "r", encoding="utf-8") as fp:
-    mdata = json.load(fp)
+try:
+    with open(manifest_full, "r", encoding="utf-8") as fp:
+        mdata = json.load(fp)
+except (json.JSONDecodeError, OSError) as e:
+    sys.stderr.write(f"error: failed to parse manifest '{manifest_full}': {e}\n")
+    sys.exit(1)
 
 blobs = []
 if "config" in mdata and "digest" in mdata["config"]:
@@ -910,37 +961,49 @@ for layer in mdata.get("layers", []):
         media_type = layer.get("mediaType", "layer").split(".")[-1]
         blobs.append((media_type, layer["digest"].replace(":", "-")))
 
+if not blobs:
+    sys.stderr.write(f"error: model '{model_name}' manifest contains no layers or blobs\n")
+    sys.exit(1)
+
 blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
 verified_blobs = 0
 total_bytes = 0
 missing_blobs = []
 
+def format_size(bytes_val):
+    if bytes_val >= 1024 * 1024 * 1024:
+        return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
+    elif bytes_val >= 1024 * 1024:
+        return f"{bytes_val / (1024 * 1024):.2f} MB"
+    elif bytes_val >= 1024:
+        return f"{bytes_val / 1024:.2f} KB"
+    else:
+        return f"{bytes_val} B"
+
 print("  Blobs:")
 for btype, bdigest in blobs:
+    if not re.match(r"^sha256-[a-f0-9]{64}$", bdigest):
+        print(f"    - {bdigest} ({btype}) [INVALID DIGEST]")
+        missing_blobs.append(bdigest)
+        continue
     bpath = os.path.join(blobs_dir, bdigest)
     if os.path.isfile(bpath):
         size = os.path.getsize(bpath)
         total_bytes += size
         verified_blobs += 1
-        if size >= 1024 * 1024:
-            s_str = f"{size / (1024 * 1024):.2f} MB"
-        else:
-            s_str = f"{size} B"
+        s_str = format_size(size)
         print(f"    - {bdigest[:19]}... ({btype}, {s_str}) [OK]")
     else:
         missing_blobs.append(bdigest)
         print(f"    - {bdigest[:19]}... ({btype}) [MISSING]")
 
-mb_str = f"{total_bytes / (1024 * 1024):.2f} MB"
+tot_str = format_size(total_bytes)
 if missing_blobs:
     print(f"  Status:           Incomplete: {len(missing_blobs)}/{len(blobs)} blobs missing on disk")
     sys.exit(1)
 else:
-    print(f"  Status:           Ready: All {len(blobs)} blobs present on disk ({mb_str})")
+    print(f"  Status:           Ready: All {len(blobs)} blobs present on disk ({tot_str})")
 PY
-      ) || info_rc=$?
-
-      echo "$info_output"
       if [[ $info_rc -ne 0 ]]; then
         exit $info_rc
       fi
@@ -951,13 +1014,19 @@ PY
         show_models_usage >&2
         exit 1
       fi
-      local switch_err=""
-      if ! switch_err=$(python3 - "$target_ollama_dir" "$PROJECT_DIR" "$model_arg" 2>&1 <<'PY'
-import os, sys, json
+      local switch_output=""
+      local switch_rc=0
+      switch_output=$(python3 - "$target_ollama_dir" "$PROJECT_DIR" "$model_arg" <<'PY'
+import os, sys, json, re
 
 ollama_dir = sys.argv[1]
 project_dir = sys.argv[2]
 model_name = sys.argv[3]
+
+MODEL_NAME_PATTERN = r'^[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*(:[a-zA-Z0-9_.-]+)?$'
+if not re.match(MODEL_NAME_PATTERN, model_name):
+    sys.stderr.write(f"error: invalid model name format: {model_name}\n")
+    sys.exit(1)
 
 if ":" in model_name:
     base_name, tag = model_name.split(":", 1)
@@ -966,26 +1035,46 @@ else:
 
 parts = base_name.split("/")
 manifests_root = os.path.join(ollama_dir, "models", "models", "manifests")
-manifest_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
-manifest_full = os.path.join(ollama_dir, manifest_rel)
+if len(parts) == 1:
+    std_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", "library", parts[0], tag)
+elif len(parts) == 2:
+    std_rel = os.path.join("models", "models", "manifests", "registry.ollama.ai", parts[0], parts[1], tag)
+else:
+    std_rel = os.path.join("models", "models", "manifests", *parts, tag)
+
+manifest_rel = std_rel
+manifest_full = os.path.join(ollama_dir, std_rel)
+
+manifests_root_real = os.path.realpath(manifests_root)
+manifest_real = os.path.realpath(manifest_full)
+if not (manifest_real == manifests_root_real or manifest_real.startswith(manifests_root_real + os.sep)):
+    sys.stderr.write(f"error: directory traversal detected: {model_name}\n")
+    sys.exit(1)
 
 if not os.path.isfile(manifest_full):
     if os.path.isdir(manifests_root):
         for root, dirs, files in os.walk(manifests_root):
             for f in files:
                 if f == tag and os.path.basename(root) == parts[-1]:
-                    manifest_full = os.path.join(root, f)
-                    manifest_rel = os.path.relpath(manifest_full, ollama_dir)
-                    break
-            if os.path.isfile(manifest_full):
+                    cand = os.path.join(root, f)
+                    cand_real = os.path.realpath(cand)
+                    if cand_real == manifests_root_real or cand_real.startswith(manifests_root_real + os.sep):
+                        manifest_full = cand
+                        manifest_rel = os.path.relpath(manifest_full, ollama_dir)
+                        break
+            if manifest_full and os.path.isfile(manifest_full):
                 break
 
 if not manifest_full or not os.path.isfile(manifest_full):
-    sys.stderr.write(f"model manifest not found on disk ({manifest_rel})\n")
+    sys.stderr.write(f"error: model '{model_name}' manifest not found on disk ({manifest_rel})\n")
     sys.exit(1)
 
-with open(manifest_full, "r", encoding="utf-8") as fp:
-    mdata = json.load(fp)
+try:
+    with open(manifest_full, "r", encoding="utf-8") as fp:
+        mdata = json.load(fp)
+except (json.JSONDecodeError, OSError) as e:
+    sys.stderr.write(f"error: failed to parse manifest '{manifest_full}': {e}\n")
+    sys.exit(1)
 
 blobs = []
 if "config" in mdata and "digest" in mdata["config"]:
@@ -995,14 +1084,22 @@ for layer in mdata.get("layers", []):
         blobs.append(layer["digest"].replace(":", "-"))
 
 blobs = sorted(list(set(blobs)))
+
+if not blobs:
+    sys.stderr.write(f"error: model '{model_name}' manifest contains no layers or blobs\n")
+    sys.exit(1)
+
 blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
 missing = []
 for b in blobs:
+    if not re.match(r"^sha256-[a-f0-9]{64}$", b):
+        sys.stderr.write(f"error: invalid blob digest format: {b}\n")
+        sys.exit(1)
     if not os.path.isfile(os.path.join(blobs_dir, b)):
         missing.append(b)
 
 if missing:
-    sys.stderr.write(f"model has {len(missing)} missing blob(s) on disk\n")
+    sys.stderr.write(f"error: model '{model_name}' has {len(missing)} missing blob(s) on disk\n")
     sys.exit(1)
 
 def atomic_update_json(filepath, updater):
@@ -1011,14 +1108,24 @@ def atomic_update_json(filepath, updater):
     dir_name = os.path.dirname(filepath)
     base_name = os.path.basename(filepath)
     tmp_path = os.path.join(dir_name, f".{base_name}.tmp.{os.getpid()}")
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    updater(data)
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    os.replace(tmp_path, filepath)
-    return True
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        updater(data)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp_path, filepath)
+        return True
+    except Exception as e:
+        sys.stderr.write(f"error: failed to update {filepath}: {e}\n")
+        return False
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 models_json = os.path.join(project_dir, "configs", "models.json")
 docker_json = os.path.join(project_dir, "configs", "teellm-docker.json")
@@ -1030,27 +1137,43 @@ def update_models(d):
 def update_cfg(d):
     d.setdefault("backend", {})["defaultModel"] = model_name
 
-if not atomic_update_json(models_json, update_models):
-    sys.stderr.write(f"warning: {models_json} not found or not updated\n")
-if not atomic_update_json(docker_json, update_cfg):
-    sys.stderr.write(f"warning: {docker_json} not found or not updated\n")
-if not atomic_update_json(prod_json, update_cfg):
-    sys.stderr.write(f"warning: {prod_json} not found or not updated\n")
+targets = [
+    (models_json, "activeModel", update_models),
+    (docker_json, "backend.defaultModel", update_cfg),
+    (prod_json, "backend.defaultModel", update_cfg),
+]
 
-print("SUCCESS")
+updated = []
+for filepath, key_desc, updater in targets:
+    rel_path = os.path.relpath(filepath, project_dir)
+    if os.path.isfile(filepath):
+        if atomic_update_json(filepath, updater):
+            updated.append((rel_path, key_desc))
+        else:
+            sys.stderr.write(f"warning: failed to update {rel_path}\n")
+    else:
+        sys.stderr.write(f"warning: {rel_path} not found\n")
+
+if not updated:
+    sys.stderr.write("error: no configuration files were updated\n")
+    sys.exit(1)
+
+for rel_path, key_desc in updated:
+    print(f"UPDATED:{rel_path}:{key_desc}")
 PY
-); then
+      ) || switch_rc=$?
+
+      if [[ $switch_rc -ne 0 ]]; then
         err "failed to switch active model to '$model_arg'"
-        if [[ -n "$switch_err" ]]; then
-          detail "$switch_err"
-        fi
-        exit 1
+        exit $switch_rc
       fi
 
       info "Active model successfully switched to: ${BOLD}$model_arg${NC}"
-      detail "configs/models.json -> activeModel: $model_arg"
-      detail "configs/teellm-docker.json -> backend.defaultModel: $model_arg"
-      detail "configs/teellm-production.json -> backend.defaultModel: $model_arg"
+      while IFS=: read -r tag file key; do
+        if [[ "$tag" == "UPDATED" ]]; then
+          detail "$file -> $key: $model_arg"
+        fi
+      done <<< "$switch_output"
       echo ""
       echo -e "${BOLD}Next steps to deploy with ${model_arg}:${NC}"
       echo "  Deploy to local Docker:      ./deploy.sh docker start"
@@ -1155,6 +1278,7 @@ while [[ $# -gt 0 ]]; do
   arg="$1"
   case "$arg" in
     models)
+      TRAP_SUPPRESS_DEPLOYMENT_BANNER=true
       shift
       handle_models_command "$@"
       exit 0
