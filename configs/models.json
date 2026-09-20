@@ -1,0 +1,86 @@
+{
+  "version": "1.0",
+  "activeModel": "qwen2.5-coder:3b",
+  "models": {
+    "qwen2.5-coder:0.5b": {
+      "family": "qwen2.5-coder",
+      "parameterSize": "0.5B",
+      "weightSizeMB": 397,
+      "recommendedRamGB": 2,
+      "timeoutSeconds": 30,
+      "options": {
+        "num_ctx": 2048,
+        "temperature": 0.1,
+        "num_predict": 160
+      },
+      "description": "Ultra-lightweight model for fast rule pre-screening (1-2s response)"
+    },
+    "qwen2.5-coder:1.5b": {
+      "family": "qwen2.5-coder",
+      "parameterSize": "1.5B",
+      "weightSizeMB": 986,
+      "recommendedRamGB": 4,
+      "timeoutSeconds": 45,
+      "options": {
+        "num_ctx": 2048,
+        "temperature": 0.1,
+        "num_predict": 200
+      },
+      "description": "Balanced lightweight model combining speed and code comprehension"
+    },
+    "qwen2.5-coder:3b": {
+      "family": "qwen2.5-coder",
+      "parameterSize": "3B",
+      "weightSizeMB": 1900,
+      "recommendedRamGB": 6,
+      "timeoutSeconds": 60,
+      "options": {
+        "num_ctx": 4096,
+        "temperature": 0.1,
+        "num_predict": 256
+      },
+      "description": "Code specialized model with high precision on AST and sensitive sink analysis"
+    },
+    "qwen2.5-coder:7b": {
+      "family": "qwen2.5-coder",
+      "parameterSize": "7B",
+      "weightSizeMB": 4700,
+      "recommendedRamGB": 8,
+      "timeoutSeconds": 90,
+      "options": {
+        "num_ctx": 4096,
+        "temperature": 0.1,
+        "num_predict": 300
+      },
+      "description": "Deep code security audit model for extensive multi-file contexts"
+    },
+    "qwen3:8b": {
+      "family": "qwen3",
+      "parameterSize": "8B",
+      "weightSizeMB": 5200,
+      "recommendedRamGB": 10,
+      "timeoutSeconds": 120,
+      "options": {
+        "num_ctx": 4096,
+        "temperature": 0.1,
+        "think": false,
+        "num_predict": 300
+      },
+      "description": "General high-capacity reasoning model with strict security boundaries"
+    },
+    "qwen3:14b": {
+      "family": "qwen3",
+      "parameterSize": "14B",
+      "weightSizeMB": 9000,
+      "recommendedRamGB": 16,
+      "timeoutSeconds": 180,
+      "options": {
+        "num_ctx": 8192,
+        "temperature": 0.1,
+        "think": false,
+        "num_predict": 512
+      },
+      "description": "High precision model for deep offline compliance verification"
+    }
+  }
+}
