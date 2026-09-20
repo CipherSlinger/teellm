@@ -1,2 +1,17 @@
 # Binaries
 bin/
+
+# Ollama runtime & models
+models/ollama/ollama
+models/ollama/ollama.*
+models/ollama/lib/
+models/ollama/models/blobs/
+models/ollama/models/models/blobs/
+models/ollama/models/cache/
+models/ollama/models/models/cache/
+
+# Ollama client identity keys
+**/id_ed25519*
+
+*.log
+
