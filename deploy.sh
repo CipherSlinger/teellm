@@ -1653,7 +1653,7 @@ deploy_docker() {
     info "ollama package transfer completed"
   fi
 
-  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "chmod +x '$CONTAINER_OLLAMA_DIR/ollama' '$CONTAINER_OLLAMA_DIR/start-ollama.sh'"
+  docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "chmod +x '$CONTAINER_OLLAMA_DIR/ollama' '$CONTAINER_OLLAMA_DIR/start-ollama.sh' '$CONTAINER_OLLAMA_DIR/lib/ollama/llama-'* 2>/dev/null || true"
 
   # Compatibility symlinks
   local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
@@ -1869,6 +1869,7 @@ sync_ollama_to_remote() {
     err "remote ollama package verification failed: missing components in $REMOTE_OLLAMA_DIR"
     exit 1
   fi
+  remote_ssh "chmod +x '$REMOTE_OLLAMA_DIR/ollama' '$REMOTE_OLLAMA_DIR/start-ollama.sh' '$REMOTE_OLLAMA_DIR/lib/ollama/llama-'* 2>/dev/null || true"
   info "ollama package verified on remote host ($REMOTE_OLLAMA_DIR)"
 }
 
@@ -1934,7 +1935,7 @@ copy_ollama_to_remote_pod() {
     info "ollama package stream transfer completed"
   fi
 
-  remote_ssh "$(container_exec) sh -lc 'chmod +x \"$CONTAINER_OLLAMA_DIR/ollama\" \"$CONTAINER_OLLAMA_DIR/start-ollama.sh\"'"
+  remote_ssh "$(container_exec) sh -lc 'chmod +x \"$CONTAINER_OLLAMA_DIR/ollama\" \"$CONTAINER_OLLAMA_DIR/start-ollama.sh\" \"$CONTAINER_OLLAMA_DIR/lib/ollama/llama-\"* 2>/dev/null || true'"
 
   # Dynamic linker compatibility symlinks
   local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
