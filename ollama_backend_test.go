@@ -12,12 +12,16 @@ import (
 func TestOllamaBackend_HandleHealthCheck(t *testing.T) {
 	t.Run("healthy endpoint", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/api/tags" {
+			switch r.URL.Path {
+			case "/api/tags":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"models":[{"name":"qwen2.5-coder:3b"}]}`))
+			case "/api/generate":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"response":"pong"}`))
+			default:
 				http.NotFound(w, r)
-				return
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"models":[]}`))
 		}))
 		defer ts.Close()
 
@@ -38,7 +42,7 @@ func TestOllamaBackend_HandleHealthCheck(t *testing.T) {
 		}
 	})
 
-	t.Run("unhealthy status code", func(t *testing.T) {
+	t.Run("unhealthy status code on tags", func(t *testing.T) {
 		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}))
@@ -58,6 +62,38 @@ func TestOllamaBackend_HandleHealthCheck(t *testing.T) {
 
 		if err := b.HandleHealthCheck(ctx); err == nil {
 			t.Fatalf("expected health check to fail for status 503")
+		}
+	})
+
+	t.Run("unhealthy generate probe with truncated weights", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/api/tags":
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"models":[{"name":"qwen2.5-coder:3b"}]}`))
+			case "/api/generate":
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"error":"read GGUF metadata: unsupported tensor offset exceeds file size"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer ts.Close()
+
+		b, err := NewOllamaBackend(OllamaBackendConfig{
+			Endpoint:     ts.URL,
+			DefaultModel: "qwen2.5-coder:3b",
+			Timeout:      2 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error creating backend: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		if err := b.HandleHealthCheck(ctx); err == nil {
+			t.Fatalf("expected health check to fail when generate probe fails with 500")
 		}
 	})
 }
