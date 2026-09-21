@@ -232,7 +232,7 @@ OLLAMA_PRUNE_SYNC="${OLLAMA_PRUNE_SYNC:-true}"
 
 # Kubernetes & Remote settings
 TARGET_NAMESPACE="${TARGET_NAMESPACE:-osr}"
-TARGET_POD="${TARGET_POD:-taa-env-slim-v2-20260911-a8d03c05ede05cdc-75847bd476-wx999}"
+TARGET_POD="${TARGET_POD:-taa-env-slim-v2-20260916-5e86f4ac05107a4b-7bc6484f48-t2vjp}"
 REMOTE_HOST="${REMOTE_HOST:-172.16.10.178}"
 REMOTE_USER="${REMOTE_USER:-root}"
 PASSWORD="${TARGET_PASSWORD:-${PASSWORD:-Osrd@2026}}"
@@ -454,12 +454,19 @@ except (json.JSONDecodeError, OSError) as e:
     sys.stderr.write(f"error: failed to parse manifest '{manifest_full}': {e}\n")
     sys.exit(1)
 
+expected_sizes = {}
 blobs = []
 if "config" in data and "digest" in data["config"]:
-    blobs.append(data["config"]["digest"].replace(":", "-"))
+    b = data["config"]["digest"].replace(":", "-")
+    blobs.append(b)
+    if "size" in data["config"]:
+        expected_sizes[b] = data["config"]["size"]
 for layer in data.get("layers", []):
     if "digest" in layer:
-        blobs.append(layer["digest"].replace(":", "-"))
+        b = layer["digest"].replace(":", "-")
+        blobs.append(b)
+        if "size" in layer:
+            expected_sizes[b] = layer["size"]
 
 blobs = sorted(list(set(blobs)))
 if not blobs:
@@ -478,8 +485,13 @@ for b in blobs:
     if not os.path.isfile(full_p):
         sys.stderr.write(f"error: missing required blob for model '{model_name}': {full_p}\n")
         sys.exit(1)
+    actual_size = os.path.getsize(full_p)
+    expected_size = expected_sizes.get(b)
+    if expected_size is not None and actual_size != expected_size:
+        sys.stderr.write(f"error: corrupted blob '{b}' for model '{model_name}': expected {expected_size} bytes, got {actual_size} bytes\n")
+        sys.exit(1)
     blob_rel_paths.append(p)
-    weight_bytes += os.path.getsize(full_p)
+    weight_bytes += actual_size
 
 base_items = ["ollama", "start-ollama.sh", "lib"]
 for opt in ["models/cache", "models/models/cache", "models/models/id_ed25519", "models/models/id_ed25519.pub"]:
@@ -509,7 +521,12 @@ elif mode == "check_model_sh":
     prefix = dest_prefix.rstrip("/") + "/" if dest_prefix else ""
     tests = [f'test -s "{prefix}{manifest_rel}"']
     for b in blob_rel_paths:
-        tests.append(f'test -s "{prefix}{b}"')
+        b_name = os.path.basename(b)
+        exp_sz = expected_sizes.get(b_name)
+        if exp_sz is not None:
+            tests.append(f'test -f "{prefix}{b}" && test "$(( $(wc -c < "{prefix}{b}" 2>/dev/null || echo 0) ))" -eq {exp_sz}')
+        else:
+            tests.append(f'test -s "{prefix}{b}"')
     print(" && ".join(tests))
 else:
     for it in full_items:
@@ -790,14 +807,22 @@ for mid in all_model_ids:
             with open(mpath, "r", encoding="utf-8") as fp:
                 mdata = json.load(fp)
             blobs = []
+            expected_sizes = {}
             if "config" in mdata and "digest" in mdata["config"]:
-                blobs.append(mdata["config"]["digest"].replace(":", "-"))
+                d = mdata["config"]["digest"].replace(":", "-")
+                blobs.append(d)
+                if "size" in mdata["config"]:
+                    expected_sizes[d] = mdata["config"]["size"]
             for layer in mdata.get("layers", []):
                 if "digest" in layer:
-                    blobs.append(layer["digest"].replace(":", "-"))
+                    d = layer["digest"].replace(":", "-")
+                    blobs.append(d)
+                    if "size" in layer:
+                        expected_sizes[d] = layer["size"]
             blobs = sorted(list(set(blobs)))
 
             missing_count = 0
+            corrupt_count = 0
             total_bytes = 0
             for b in blobs:
                 if not re.match(r"^sha256-[a-f0-9]{64}$", b):
@@ -805,7 +830,11 @@ for mid in all_model_ids:
                     continue
                 bp = os.path.join(blobs_dir, b)
                 if os.path.isfile(bp):
-                    total_bytes += os.path.getsize(bp)
+                    actual_sz = os.path.getsize(bp)
+                    total_bytes += actual_sz
+                    exp_sz = expected_sizes.get(b)
+                    if exp_sz is not None and actual_sz != exp_sz:
+                        corrupt_count += 1
                 else:
                     missing_count += 1
 
@@ -816,10 +845,14 @@ for mid in all_model_ids:
             else:
                 disk_size_str = "0 MB"
 
-            if missing_count == 0 and len(blobs) > 0:
-                status = "ready"
+            if corrupt_count > 0 and missing_count > 0:
+                status = f"corrupt {corrupt_count}b, missing {missing_count}b"
+            elif corrupt_count > 0:
+                status = f"corrupt {corrupt_count}b"
             elif missing_count > 0:
                 status = f"missing {missing_count}b"
+            elif len(blobs) > 0:
+                status = "ready"
             else:
                 status = "empty"
         except Exception:
@@ -954,12 +987,19 @@ except (json.JSONDecodeError, OSError) as e:
     sys.exit(1)
 
 blobs = []
+expected_sizes = {}
 if "config" in mdata and "digest" in mdata["config"]:
-    blobs.append(("config", mdata["config"]["digest"].replace(":", "-")))
+    d = mdata["config"]["digest"].replace(":", "-")
+    blobs.append(("config", d))
+    if "size" in mdata["config"]:
+        expected_sizes[d] = mdata["config"]["size"]
 for layer in mdata.get("layers", []):
     if "digest" in layer:
         media_type = layer.get("mediaType", "layer").split(".")[-1]
-        blobs.append((media_type, layer["digest"].replace(":", "-")))
+        d = layer["digest"].replace(":", "-")
+        blobs.append((media_type, d))
+        if "size" in layer:
+            expected_sizes[d] = layer["size"]
 
 if not blobs:
     sys.stderr.write(f"error: model '{model_name}' manifest contains no layers or blobs\n")
@@ -969,6 +1009,7 @@ blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
 verified_blobs = 0
 total_bytes = 0
 missing_blobs = []
+mismatched_blobs = []
 
 def format_size(bytes_val):
     if bytes_val >= 1024 * 1024 * 1024:
@@ -990,16 +1031,27 @@ for btype, bdigest in blobs:
     if os.path.isfile(bpath):
         size = os.path.getsize(bpath)
         total_bytes += size
-        verified_blobs += 1
+        exp_sz = expected_sizes.get(bdigest)
         s_str = format_size(size)
-        print(f"    - {bdigest[:19]}... ({btype}, {s_str}) [OK]")
+        if exp_sz is not None and size != exp_sz:
+            mismatched_blobs.append((bdigest, exp_sz, size))
+            exp_str = format_size(exp_sz)
+            print(f"    - {bdigest[:19]}... ({btype}, actual {s_str}, expected {exp_str}) [SIZE MISMATCH]")
+        else:
+            verified_blobs += 1
+            print(f"    - {bdigest[:19]}... ({btype}, {s_str}) [OK]")
     else:
         missing_blobs.append(bdigest)
         print(f"    - {bdigest[:19]}... ({btype}) [MISSING]")
 
 tot_str = format_size(total_bytes)
-if missing_blobs:
-    print(f"  Status:           Incomplete: {len(missing_blobs)}/{len(blobs)} blobs missing on disk")
+if missing_blobs or mismatched_blobs:
+    details = []
+    if missing_blobs:
+        details.append(f"{len(missing_blobs)} missing")
+    if mismatched_blobs:
+        details.append(f"{len(mismatched_blobs)} size mismatch")
+    print(f"  Status:           Incomplete / Size mismatch: {', '.join(details)} out of {len(blobs)} blobs ({tot_str} on disk)")
     sys.exit(1)
 else:
     print(f"  Status:           Ready: All {len(blobs)} blobs present on disk ({tot_str})")
@@ -1077,11 +1129,18 @@ except (json.JSONDecodeError, OSError) as e:
     sys.exit(1)
 
 blobs = []
+expected_sizes = {}
 if "config" in mdata and "digest" in mdata["config"]:
-    blobs.append(mdata["config"]["digest"].replace(":", "-"))
+    d = mdata["config"]["digest"].replace(":", "-")
+    blobs.append(d)
+    if "size" in mdata["config"]:
+        expected_sizes[d] = mdata["config"]["size"]
 for layer in mdata.get("layers", []):
     if "digest" in layer:
-        blobs.append(layer["digest"].replace(":", "-"))
+        d = layer["digest"].replace(":", "-")
+        blobs.append(d)
+        if "size" in layer:
+            expected_sizes[d] = layer["size"]
 
 blobs = sorted(list(set(blobs)))
 
@@ -1091,15 +1150,28 @@ if not blobs:
 
 blobs_dir = os.path.join(ollama_dir, "models", "models", "blobs")
 missing = []
+corrupted = []
 for b in blobs:
     if not re.match(r"^sha256-[a-f0-9]{64}$", b):
         sys.stderr.write(f"error: invalid blob digest format: {b}\n")
         sys.exit(1)
-    if not os.path.isfile(os.path.join(blobs_dir, b)):
+    bp = os.path.join(blobs_dir, b)
+    if not os.path.isfile(bp):
         missing.append(b)
+    else:
+        act_sz = os.path.getsize(bp)
+        exp_sz = expected_sizes.get(b)
+        if exp_sz is not None and act_sz != exp_sz:
+            corrupted.append((b, exp_sz, act_sz))
 
 if missing:
     sys.stderr.write(f"error: model '{model_name}' has {len(missing)} missing blob(s) on disk\n")
+    sys.exit(1)
+
+if corrupted:
+    sys.stderr.write(f"error: model '{model_name}' has {len(corrupted)} corrupted or size-mismatched blob(s) on disk\n")
+    for b, exp, act in corrupted:
+        sys.stderr.write(f"  - blob {b}: expected {exp} bytes, got {act} bytes\n")
     sys.exit(1)
 
 def atomic_update_json(filepath, updater):
@@ -1661,6 +1733,9 @@ deploy_docker() {
   prepare_config "$cfg_template" "$tmp_cfg" "$OLLAMA_MODEL" "$TEELLM_PORT" "$CON_WORKDIR/certs/hrk.cert" "$CON_WORKDIR/certs/hsk_cek.cert"
   docker cp "$tmp_cfg" "$LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/configs/teellm-docker.json"
   docker cp "$tmp_cfg" "$LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/teellm-docker.json" 2>/dev/null || true
+  if [[ -f "$PROJECT_DIR/configs/models.json" ]]; then
+    docker cp "$PROJECT_DIR/configs/models.json" "$LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/configs/models.json" >/dev/null 2>&1 || true
+  fi
   rm -f "$tmp_cfg"
   TEMP_CONFIG_FILE=""
   info "configuration deployed to $LOCAL_DOCKER_CONTAINER:$CON_WORKDIR/configs/teellm-docker.json"
@@ -1934,6 +2009,9 @@ deploy_remote() {
   remote_ssh "mkdir -p '$REMOTE_DIR/configs' '$REMOTE_DIR/certs'"
   sshpass -p "$PASSWORD" scp "${SSH_OPTS[@]}" "$PROJECT_DIR/bin/teellm-service" "${REMOTE_USER}@${REMOTE_HOST}:$REMOTE_DIR/teellm-service.new"
   sshpass -p "$PASSWORD" scp "${SSH_OPTS[@]}" "$tmp_cfg" "${REMOTE_USER}@${REMOTE_HOST}:$REMOTE_DIR/configs/teellm-production.json"
+  if [[ -f "$PROJECT_DIR/configs/models.json" ]]; then
+    sshpass -p "$PASSWORD" scp "${SSH_OPTS[@]}" "$PROJECT_DIR/configs/models.json" "${REMOTE_USER}@${REMOTE_HOST}:$REMOTE_DIR/configs/models.json"
+  fi
   rm -f "$tmp_cfg"
   TEMP_CONFIG_FILE=""
 
@@ -1949,6 +2027,9 @@ deploy_remote() {
   remote_ssh "$(container_exec) sh -lc 'mkdir -p \"$CON_WORKDIR/certs\" \"$CON_WORKDIR/configs\"'"
   remote_ssh "$(container_cp "$REMOTE_DIR/teellm-service" "$CON_WORKDIR/teellm-service")"
   remote_ssh "$(container_cp "$REMOTE_DIR/configs/teellm-production.json" "$CON_WORKDIR/configs/teellm-production.json")"
+  if [[ -f "$PROJECT_DIR/configs/models.json" ]]; then
+    remote_ssh "$(container_cp "$REMOTE_DIR/configs/models.json" "$CON_WORKDIR/configs/models.json")"
+  fi
   remote_ssh "$(container_exec) sh -lc 'chmod +x \"$CON_WORKDIR/teellm-service\"'"
   if [[ -n "$LOCAL_HRK_CERT" && -n "$LOCAL_HSK_CERT" ]]; then
     remote_ssh "$(container_cp "$REMOTE_DIR/certs/hrk.cert" "$CON_WORKDIR/certs/hrk.cert")"
@@ -1986,6 +2067,7 @@ deploy_remote() {
   printf "\r\033[K"
   if [[ "$teellm_ready" != true ]]; then
     err "remote teellm-service did not become ready on https://127.0.0.1:${TEELLM_PORT}"
+    remote_ssh "$(container_exec) \"$CON_WORKDIR/teellm-service\" -probe \"https://127.0.0.1:${TEELLM_PORT}\" || true"
     remote_ssh "$(container_exec) tail -n 60 '$TEELLM_LOG_FILE' || true"
     exit 1
   fi
