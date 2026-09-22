@@ -4,6 +4,7 @@
 set -u
 cd /root/taa || exit 1
 LOG=/root/taa/teellm-service.log
+LOCK=/root/taa/.start-teellm.lock
 OLLAMA_DIR="${OLLAMA_DIR:-/root/taa/ollama}"
 OLLAMA_HOST="127.0.0.1:11434"
 TEEPID=""
@@ -17,6 +18,28 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
+# Singleton guard: this wrapper is the one that races. Both deploy scripts start their own
+# copy (TAA's start.sh launches this script as well), and two loops fighting over :8443 leave
+# one respawning teellm-service every 10s on a permanent bind failure. flock is used instead
+# of a pidfile because the lock is kernel state released when this process dies, so a stale
+# lock can never wedge the container's ENTRYPOINT. Every child below closes the lock fd, so an
+# orphaned daemon cannot keep the lock after the supervisor itself is gone.
+exec 9>"$LOCK"
+if command -v flock >/dev/null 2>&1; then
+  flock -n 9
+  lock_rc=$?
+  if [ "$lock_rc" -eq 1 ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): another start-teellm.sh already holds the singleton lock, exiting" >> "$LOG"
+    exit 0
+  elif [ "$lock_rc" -ne 0 ]; then
+    # An unusable lock (e.g. flock rc=65, bad fd) must never be read as "someone else owns
+    # it": that would let the container's ENTRYPOINT exit instantly and kill the container.
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): warning: singleton lock unusable (flock rc=${lock_rc}), continuing unguarded" >> "$LOG"
+  fi
+else
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): warning: flock not found, singleton guard disabled" >> "$LOG"
+fi
+
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): teellm autostart wrapper started" >> "$LOG"
 
 # Step 1: Ensure Ollama backend is running
@@ -26,7 +49,7 @@ ensure_ollama() {
   fi
   if [ -x "${OLLAMA_DIR}/start-ollama.sh" ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): starting ollama daemon via ${OLLAMA_DIR}/start-ollama.sh" >> "$LOG"
-    (cd "$OLLAMA_DIR" && exec ./start-ollama.sh >> /root/taa/ollama.log 2>&1) &
+    (cd "$OLLAMA_DIR" && exec ./start-ollama.sh >> /root/taa/ollama.log 2>&1) 9>&- &
     for _ in {1..30}; do
       if curl -fsS "http://${OLLAMA_HOST}/api/tags" >/dev/null 2>&1; then
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): ollama daemon ready" >> "$LOG"
@@ -64,7 +87,7 @@ while true; do
   fi
 
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): starting ./teellm-service ${CONFIG_ARGS[*]}" >> "$LOG"
-  ./teellm-service "${CONFIG_ARGS[@]}" >> "$LOG" 2>&1 &
+  ./teellm-service "${CONFIG_ARGS[@]}" >> "$LOG" 2>&1 9>&- &
   TEEPID=$!
   wait "$TEEPID"
   EXIT_CODE=$?
