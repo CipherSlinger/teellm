@@ -25,17 +25,31 @@ var (
 // MaxResponsePayloadBytes defines the maximum permissible size of a response payload (1MB).
 const MaxResponsePayloadBytes = 1 << 20
 
+// DefaultHealthCheckTimeout is the budget a health check gets when the caller
+// sets no HealthCheckTimeout of its own.
+//
+// It is far longer than an ordinary request timeout because /healthz is not a
+// ping: the service answers it only once the model is loaded, which on a cold
+// service is seconds of disk and memory work. Budgeting it like an ordinary
+// request yields a readiness gate a cold service can never pass - and retrying
+// does not help, because cutting an attempt off cancels the load it was waiting
+// on, so the next attempt starts the load again from nothing.
+const DefaultHealthCheckTimeout = 120 * time.Second
+
 // Config configures the TEE-LLM client.
 type Config struct {
-	Endpoint                        string
-	Timeout                         time.Duration
-	AllowedHosts                    []string
-	TEETLS                          *teetls.Config
-	CircuitBreakerFailureThreshold  int
-	CircuitBreakerCooldown          time.Duration
-	MaxRetries                      int
-	RetryBaseDelay                  time.Duration
-	RetryMaxDelay                   time.Duration
+	Endpoint string
+	// Timeout bounds an ordinary request. It does not bound a health check;
+	// see HealthCheckTimeout.
+	Timeout                        time.Duration
+	HealthCheckTimeout             time.Duration
+	AllowedHosts                   []string
+	TEETLS                         *teetls.Config
+	CircuitBreakerFailureThreshold int
+	CircuitBreakerCooldown         time.Duration
+	MaxRetries                     int
+	RetryBaseDelay                 time.Duration
+	RetryMaxDelay                  time.Duration
 }
 
 // Client defines the interface for communicating with the TEE-LLM inference service.
@@ -46,10 +60,11 @@ type Client interface {
 }
 
 type client struct {
-	cfg        Config
-	httpClient *http.Client
-	cb         *CircuitBreaker
-	endpoint   string
+	cfg          Config
+	httpClient   *http.Client
+	healthClient *http.Client
+	cb           *CircuitBreaker
+	endpoint     string
 }
 
 // NewClient creates and validates a new TEE-LLM Client instance.
@@ -76,6 +91,9 @@ func NewClient(cfg Config) (Client, error) {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
+	if cfg.HealthCheckTimeout <= 0 {
+		cfg.HealthCheckTimeout = DefaultHealthCheckTimeout
+	}
 
 	cb := NewCircuitBreaker(cfg.CircuitBreakerFailureThreshold, cfg.CircuitBreakerCooldown)
 
@@ -89,13 +107,20 @@ func NewClient(cfg Config) (Client, error) {
 		}
 	}
 
+	// A second client, sharing the transport so the connection pool and any
+	// TEE-TLS state stay common, but carrying the health budget instead of the
+	// request budget.
+	healthClient := *httpClient
+	healthClient.Timeout = cfg.HealthCheckTimeout
+
 	endpoint := strings.TrimRight(cfg.Endpoint, "/")
 
 	return &client{
-		cfg:        cfg,
-		httpClient: httpClient,
-		cb:         cb,
-		endpoint:   endpoint,
+		cfg:          cfg,
+		httpClient:   httpClient,
+		healthClient: &healthClient,
+		cb:           cb,
+		endpoint:     endpoint,
 	}, nil
 }
 
@@ -190,7 +215,7 @@ func (c *client) HealthCheck(ctx context.Context) error {
 			return reqErr
 		}
 
-		resp, doErr := c.httpClient.Do(httpReq)
+		resp, doErr := c.healthClient.Do(httpReq)
 		if doErr != nil {
 			if ctx != nil && ctx.Err() != nil {
 				c.cb.ResetProbe()

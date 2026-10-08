@@ -109,10 +109,20 @@ func mergeConfigWithFlags(cfg *ServiceConfigFile, explicitFlags map[string]bool,
 	}
 }
 
+// probeContextTimeout bounds one readiness probe invocation.
+//
+// It sits just above the client's health budget so that a backend that never
+// answers is reported as a health-check timeout rather than as an opaque
+// cancellation, and it is generous because /healthz loads the model on a cold
+// service: the probe deploys run is the very thing that warms it.
+const probeContextTimeout = teellm.DefaultHealthCheckTimeout + 10*time.Second
+
 func runProbe(ctx context.Context, endpoint string) error {
+	// No request Timeout: the probe only ever calls HealthCheck, whose budget is
+	// HealthCheckTimeout, and a short request timeout here would be a misleading
+	// no-op rather than a bound.
 	client, err := teellm.NewClient(teellm.Config{
 		Endpoint: endpoint,
-		Timeout:  5 * time.Second,
 		TEETLS: &teetls.Config{
 			Mode:                          teetls.ModePermissive,
 			InsecureSkipAttestationVerify: true,
@@ -153,7 +163,7 @@ func main() {
 
 	// Probe mode
 	if probeTarget != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), probeContextTimeout)
 		defer cancel()
 
 		if err := runProbe(ctx, probeTarget); err != nil {
