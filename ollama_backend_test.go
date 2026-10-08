@@ -266,11 +266,13 @@ func TestOllamaBackend_CatalogOptionsMerged(t *testing.T) {
 // exist: they make a re-binding readable in the failure output.
 //
 // The rubric's position is pinned because moving it was measured, not because
-// it is arbitrary. Hoisting the rubric to the front of the prompt (a natural
-// idea: it lengthens the prefix that every finding shares, and llama.cpp reuses
-// only a common prefix) took the per-call cached prefix from 62 to 553 tokens
-// and cut prompt eval from ~84s to ~29s across five findings - and broke the
-// verdicts. On the same sample, same model, same payloads:
+// it is arbitrary. Two experiments sit behind this ordering.
+//
+// First, hoisting the rubric to the front of the prompt (a natural idea: it
+// lengthens the prefix that every finding shares, and llama.cpp reuses only a
+// common prefix) took the per-call cached prefix from 62 to 553 tokens and cut
+// prompt eval from ~84s to ~29s across five findings - and broke the verdicts.
+// On the same sample, same model, same payloads:
 //
 //	rubric after the code: DYN_001 BENIGN, EMB_003 x4 BENIGN, passed=true
 //	rubric before the code: DYN_001 MALICIOUS, EMB_003 mostly SUSPICIOUS,
@@ -279,9 +281,55 @@ func TestOllamaBackend_CatalogOptionsMerged(t *testing.T) {
 // The rubric names rule ids (EMB_003, DYN_001) and says they must be BENIGN.
 // With the rubric last, those ids are still fresh when the model answers; with
 // the rubric first, the code and the rule block sit between the instruction and
-// the answer. The speed was real and so was the regression, so this ordering is
-// load-bearing and the test exists to make the next reorder fail loudly rather
-// than quietly.
+// the answer, and the binding is what gets lost.
+//
+// The ordering pinned below is the second experiment. The rubric is still
+// hoisted - that is where the whole speedup comes from - but the binding is
+// restated in "## 判定提醒" immediately before the answer, on the theory that
+// one uncacheable line is cheaper than losing the rule ids to distance.
+//
+// It was measured against the old layout in an A/B/B/A run of the end-to-end
+// audit (old, new, new, old; five findings each), timing every request from the
+// server log:
+//
+//	cached prefix      62 -> 553 tokens
+//	per call (median)  19.65s -> 13.24s
+//	per audit          99.3s -> 71.0s  (1.40x over five findings; 1.57x once
+//	                                    the first, still-cold call is amortised
+//	                                    over a longer audit)
+//
+// The verdicts did not hold as cleanly as that number suggests, and the honest
+// summary is that this run could not tell the two layouts apart. Three arms
+// returned the baseline verdict set verbatim; the fourth - the *old* layout,
+// the control - turned one EMB_003 finding into MALICIOUS and blocked the
+// import. Its reason ("printing the dataset name may leak sensitive information
+// into log files") contradicts the exemption the rubric states in as many
+// words, and the other four findings in that same run quote the rubric
+// correctly, so it is a sampling slip at temperature 0.1 rather than a reading
+// failure. Same binary, same prompts: the two control arms logged identical
+// prompt-eval token counts (844/805/927/690/890) and still disagreed.
+//
+// That control failure bounds what this test can claim. The unmodified prompt
+// already flips roughly one finding in ten, so two clean runs of the new layout
+// are the expected outcome under either hypothesis, and only a much larger
+// sample could separate them. The speedup above is measured; the verdicts are
+// only "not obviously worse". What the first experiment saw was different in
+// kind - a broad shift, DYN_001 and most EMB_003 at once, reproduced twice -
+// which is why the reminder is kept as insurance even though this run did not
+// need it.
+//
+// Both halves are pinned for reasons that do not lean on that evidence: move
+// the rubric back after the code and the cacheable prefix collapses from 945
+// characters to 45, so every call pays to re-evaluate the entire rubric again;
+// delete the reminder and nothing stands between a hoisted rubric and the first
+// experiment's failure mode.
+//
+// Concurrency was measured too, and is not an alternative lever: with 8 prompts
+// and num_predict 256, raising OLLAMA_NUM_PARALLEL from 1 to 4 changed aggregate
+// throughput by nothing (165.4s vs 163.1s for the same 8 calls) and raising it
+// to 8 made things worse (208.5s, and every call exceeded 142s - past the 120s
+// request timeout, which under assist+failClosed turns each finding UNCERTAIN
+// and blocks the import). The host is compute-bound; only doing less work helps.
 func TestFindingAnalysisPromptOrderAndVerbs(t *testing.T) {
 	var capturedPrompt string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -327,11 +375,11 @@ func TestFindingAnalysisPromptOrderAndVerbs(t *testing.T) {
 		t.Errorf("rendered prompt carries a fmt error marker:\n%s", capturedPrompt)
 	}
 
-	// The layout invariant. Each step is load-bearing: the code comes first, the
-	// rubric that names the rule ids comes after the rule block, and the bare-JSON
-	// demand stays nearest generation. See the note on this test for the measured
-	// cost of getting the rubric's position wrong.
-	order := []string{"## 代码片段", "规则说明", "判定优先级与安全边界", "## 请回答", `{"verdict"`}
+	// The layout invariant. Each step is load-bearing: the rubric is hoisted so it
+	// forms a cacheable prefix, the restated binding sits between the rule block
+	// and the answer, and the bare-JSON demand stays nearest generation. See the
+	// note on this test for what each position was measured to cost.
+	order := []string{"判定优先级与安全边界", "## 代码片段", "规则说明", "## 判定提醒", "## 请回答", `{"verdict"`}
 	prev := -1
 	for _, marker := range order {
 		at := strings.Index(capturedPrompt, marker)
@@ -356,5 +404,97 @@ func TestFindingAnalysisPromptOrderAndVerbs(t *testing.T) {
 			t.Errorf("sentinel %s is out of order: at %d, previous sentinel at %d", w, at, prev)
 		}
 		prev = at
+	}
+}
+
+// TestFindingAnalysisPromptCachingInvariants pins the two properties that make
+// hoisting the rubric worth its risk. Neither one shows up in a verdict, so
+// without this test a later edit could quietly undo either of them and the only
+// symptom would be a slower audit.
+//
+//  1. The rubric must precede the variable blocks. llama.cpp reuses only a
+//     common prefix, so this one ordering fact is the entire speedup: the fixed
+//     prefix is 945 characters when the rubric leads and 45 when it trails, and
+//     the measured cached-token count follows (553 against 62 per call).
+//  2. The restated binding must sit between the rule block and the answer, and
+//     the benign exemptions must survive. The rubric names five rule ids and
+//     binds them to BENIGN, and DYN_001 to BENIGN specifically is a written
+//     requirement in section 2.2 of
+//     .claude/specs/2026-09-18-codeaudit-risk-classification-and-precision-design.md,
+//     not an incidental turn of phrase. A rewrite that dropped one of those ids
+//     would still render, still parse, and still be wrong.
+func TestFindingAnalysisPromptCachingInvariants(t *testing.T) {
+	var capturedPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		capturedPrompt, _ = body["prompt"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response": "{\"verdict\":\"BENIGN\",\"reason\":\"ok\"}"}`))
+	}))
+	defer server.Close()
+
+	b, err := NewOllamaBackend(OllamaBackendConfig{Endpoint: server.URL, DefaultModel: "test-model"})
+	if err != nil {
+		t.Fatalf("failed to create backend: %v", err)
+	}
+	req := &RequestEnvelope{
+		RequestID: "req-cache-1",
+		FindingPayload: &FindingPayload{
+			RuleID:      "EMB_003",
+			Category:    "data_leak",
+			Severity:    "low",
+			Description: "print(dataset)",
+			Target:      CodeTarget{FilePath: "train.py", Line: 8, CodeSnippet: "print(dataset)"},
+		},
+	}
+	if _, err := b.HandleVerifyFinding(context.Background(), req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedPrompt == "" {
+		t.Fatal("server captured no prompt")
+	}
+
+	// 1. The cacheable prefix: everything before the first variable block is what
+	// llama.cpp can reuse across findings. If the rubric slips back after the code
+	// the prefix collapses to the fixed instruction line and the speedup is gone.
+	rubricAt := strings.Index(capturedPrompt, "## 判定优先级与安全边界")
+	codeAt := strings.Index(capturedPrompt, "## 代码片段")
+	if rubricAt < 0 || codeAt < 0 {
+		t.Fatalf("prompt is missing the rubric (at %d) or the code block (at %d)", rubricAt, codeAt)
+	}
+	if rubricAt > codeAt {
+		t.Errorf("the rubric must precede the code block to stay cacheable: rubric at %d, code at %d", rubricAt, codeAt)
+	}
+
+	// 2. The restated binding. Both positions matter: after the rule block so it
+	// follows the rule ids it names, and before the answer so it is still fresh
+	// when the model commits to a verdict.
+	reminderAt := strings.Index(capturedPrompt, "## 判定提醒")
+	if reminderAt < 0 {
+		t.Fatal("the restated binding (## 判定提醒) is missing; without it the verdicts regress")
+	}
+	rulesAt := strings.Index(capturedPrompt, "规则说明")
+	if rulesAt < 0 || reminderAt < rulesAt {
+		t.Errorf("the restated binding must follow the rule block: rules at %d, reminder at %d", rulesAt, reminderAt)
+	}
+	if answerAt := strings.Index(capturedPrompt, "## 请回答"); answerAt < 0 || reminderAt > answerAt {
+		t.Errorf("the restated binding must precede the answer: reminder at %d, answer at %d", reminderAt, answerAt)
+	}
+	reminder := capturedPrompt[reminderAt:strings.Index(capturedPrompt, "## 请回答")]
+	if !strings.Contains(reminder, "BENIGN") || !strings.Contains(reminder, "DYN_001") {
+		t.Errorf("the restated binding is not restating anything:\n%s", reminder)
+	}
+
+	// 3. The benign exemptions, and the property that lets the rubric live inside a
+	// fmt.Sprintf format string at all.
+	for _, id := range []string{"EMB_001", "EMB_002", "EMB_003", "EMB_004", "DYN_001"} {
+		if !strings.Contains(capturedPrompt, id) {
+			t.Errorf("the prompt no longer binds %s to BENIGN", id)
+		}
+	}
+	if n := strings.Count(capturedPrompt[:codeAt], "%"); n != 0 {
+		t.Errorf("the cacheable prefix holds %d '%%' characters; it is a fmt.Sprintf format string, "+
+			"so a stray verb would corrupt every rendered prompt", n)
 	}
 }
