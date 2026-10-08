@@ -1,8 +1,8 @@
 {
   "server": {
     "addr": ":8443",
-    "readTimeoutSeconds": 60,
-    "writeTimeoutSeconds": 60,
+    "readTimeoutSeconds": 120,
+    "writeTimeoutSeconds": 120,
     "maxResponseBytes": 1048576
   },
   "backend": {
@@ -10,7 +10,7 @@
     "endpoint": "http://127.0.0.1:11434",
     "defaultModel": "qwen2.5-coder:3b",
     "modelCatalogPath": "./configs/models.json",
-    "timeoutSeconds": 60
+    "timeoutSeconds": 100
   },
   "attestation": {
     "mode": "permissive",
