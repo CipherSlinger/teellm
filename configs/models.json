@@ -10,7 +10,6 @@
       "timeoutSeconds": 30,
       "options": {
         "num_ctx": 2048,
-        "temperature": 0.1,
         "num_predict": 160
       },
       "description": "Ultra-lightweight model for fast rule pre-screening (1-2s response)"
@@ -23,7 +22,6 @@
       "timeoutSeconds": 45,
       "options": {
         "num_ctx": 2048,
-        "temperature": 0.1,
         "num_predict": 200
       },
       "description": "Balanced lightweight model combining speed and code comprehension"
@@ -36,7 +34,6 @@
       "timeoutSeconds": 60,
       "options": {
         "num_ctx": 4096,
-        "temperature": 0.1,
         "num_predict": 256
       },
       "description": "Code specialized model with high precision on AST and sensitive sink analysis"
@@ -49,7 +46,6 @@
       "timeoutSeconds": 90,
       "options": {
         "num_ctx": 4096,
-        "temperature": 0.1,
         "num_predict": 300
       },
       "description": "Deep code security audit model for extensive multi-file contexts"
@@ -62,7 +58,6 @@
       "timeoutSeconds": 120,
       "options": {
         "num_ctx": 4096,
-        "temperature": 0.1,
         "think": false,
         "num_predict": 300
       },
@@ -76,7 +71,6 @@
       "timeoutSeconds": 180,
       "options": {
         "num_ctx": 8192,
-        "temperature": 0.1,
         "think": false,
         "num_predict": 512
       },

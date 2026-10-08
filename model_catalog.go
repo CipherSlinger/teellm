@@ -48,7 +48,6 @@ func DefaultModelCatalog() *ModelCatalog {
 				TimeoutSeconds: 30,
 				Options: map[string]any{
 					"num_ctx":     2048,
-					"temperature": 0.1,
 					"num_predict": 160,
 				},
 			},
@@ -58,7 +57,6 @@ func DefaultModelCatalog() *ModelCatalog {
 				TimeoutSeconds: 45,
 				Options: map[string]any{
 					"num_ctx":     2048,
-					"temperature": 0.1,
 					"num_predict": 200,
 				},
 			},
@@ -68,7 +66,6 @@ func DefaultModelCatalog() *ModelCatalog {
 				TimeoutSeconds: 60,
 				Options: map[string]any{
 					"num_ctx":     4096,
-					"temperature": 0.1,
 					"num_predict": 256,
 				},
 			},
@@ -78,7 +75,6 @@ func DefaultModelCatalog() *ModelCatalog {
 				TimeoutSeconds: 90,
 				Options: map[string]any{
 					"num_ctx":     4096,
-					"temperature": 0.1,
 					"num_predict": 300,
 				},
 			},
@@ -88,7 +84,6 @@ func DefaultModelCatalog() *ModelCatalog {
 				TimeoutSeconds: 120,
 				Options: map[string]any{
 					"num_ctx":     4096,
-					"temperature": 0.1,
 					"think":       false,
 					"num_predict": 300,
 				},
@@ -99,7 +94,6 @@ func DefaultModelCatalog() *ModelCatalog {
 				TimeoutSeconds: 180,
 				Options: map[string]any{
 					"num_ctx":     8192,
-					"temperature": 0.1,
 					"think":       false,
 					"num_predict": 512,
 				},
@@ -152,7 +146,6 @@ func (c *ModelCatalog) GetProfile(modelName string) *ModelProfile {
 	if c == nil {
 		return &ModelProfile{
 			Options: map[string]any{
-				"temperature": 0.1,
 				"num_predict": 200,
 			},
 		}
@@ -177,7 +170,6 @@ func (c *ModelCatalog) GetProfile(modelName string) *ModelProfile {
 	return &ModelProfile{
 		TimeoutSeconds: 60,
 		Options: map[string]any{
-			"temperature": 0.1,
 			"num_predict": 200,
 		},
 	}

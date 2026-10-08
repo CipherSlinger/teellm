@@ -256,6 +256,116 @@ func TestOllamaBackend_CatalogOptionsMerged(t *testing.T) {
 	}
 }
 
+// TestOllamaBackend_TemperatureIsPinned pins the audit's determinism as a
+// property of the backend rather than of any one model profile.
+//
+// The failure it guards against is not a crash. At temperature 0.1 the audit
+// flipped roughly one real finding in ten to MALICIOUS, and under assist +
+// failClosed that verdict blocks an import of code that never changed. Sampling
+// is a proven source of that kind of drift: replaying the five captured prompts
+// at 20 samples each, 0.1 produced between 2 and 15 distinct completions per
+// prompt, while 0 produced exactly one.
+//
+// What that measurement does not establish is that sampling accounts for the
+// observed flip rate. The same replay produced no MALICIOUS at either
+// temperature, so the E2E flip is rare enough (or context-dependent enough) to
+// have stayed out of reach. Pinning the temperature removes one source of
+// nondeterminism; it is not a demonstrated fix for the blocked import.
+//
+// The second subtest is the load-bearing one. The catalog merge runs before
+// the pin, so a profile carrying its own temperature would overwrite the pin
+// and silently re-randomise the audit -- which is exactly how the same 0.1
+// ended up duplicated across the built-in catalog, the shipped JSON catalog
+// and the backend default, with only whichever merged last actually mattering.
+func TestOllamaBackend_TemperatureIsPinned(t *testing.T) {
+	captureOptions := func(t *testing.T, req *RequestEnvelope, catalog *ModelCatalog) map[string]any {
+		t.Helper()
+
+		var capturedBody map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/generate" {
+				http.NotFound(w, r)
+				return
+			}
+			_ = json.NewDecoder(r.Body).Decode(&capturedBody)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"response": "{\"verdict\":\"BENIGN\",\"reason\":\"ok\"}"}`))
+		}))
+		defer server.Close()
+
+		cfg := OllamaBackendConfig{Endpoint: server.URL, DefaultModel: "qwen2.5-coder:3b"}
+		if catalog != nil {
+			cfg.Catalog = catalog
+		}
+		b, err := NewOllamaBackend(cfg)
+		if err != nil {
+			t.Fatalf("failed to create backend: %v", err)
+		}
+		if _, err := b.HandleVerifyFinding(context.Background(), req); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		options, ok := capturedBody["options"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected options map in request body, got %v", capturedBody["options"])
+		}
+		return options
+	}
+
+	newRequest := func() *RequestEnvelope {
+		return &RequestEnvelope{
+			RequestID: "req-temp-1",
+			FindingPayload: &FindingPayload{
+				RuleID: "RULE_01",
+				Target: CodeTarget{FilePath: "test.py", Line: 10},
+			},
+		}
+	}
+
+	t.Run("default request asks for greedy decoding", func(t *testing.T) {
+		// The built-in catalog must not be able to set it either.
+		options := captureOptions(t, newRequest(), DefaultModelCatalog())
+		if options["temperature"] != float64(0) {
+			t.Errorf("expected temperature=0, got %v", options["temperature"])
+		}
+	})
+
+	t.Run("a catalog profile cannot raise it", func(t *testing.T) {
+		catalog := &ModelCatalog{
+			Models: map[string]ModelProfile{
+				"qwen2.5-coder:3b": {
+					Options: map[string]any{
+						"num_ctx":     float64(4096),
+						"temperature": 0.1,
+					},
+				},
+			},
+		}
+		options := captureOptions(t, newRequest(), catalog)
+		if options["temperature"] != float64(0) {
+			t.Errorf("catalog profile re-randomised the audit: temperature=%v", options["temperature"])
+		}
+		// The rest of the profile must still merge through untouched.
+		if options["num_ctx"] != float64(4096) {
+			t.Errorf("expected num_ctx=4096, got %v", options["num_ctx"])
+		}
+	})
+
+	t.Run("an explicit policy temperature still wins", func(t *testing.T) {
+		// 0.5 rather than 0.1: PolicyOptions.Temperature is a *float32, and this
+		// subtest compares the decoded float64 body, so it needs a value float32
+		// can hold exactly.
+		explicit := float32(0.5)
+		req := newRequest()
+		req.Policy = PolicyOptions{Temperature: &explicit}
+		options := captureOptions(t, req, DefaultModelCatalog())
+		if options["temperature"] != 0.5 {
+			t.Errorf("expected policy temperature=0.5 to override the pin, got %v", options["temperature"])
+		}
+	})
+}
+
 // TestFindingAnalysisPromptOrderAndVerbs pins the layout of the finding prompt:
 // how the nine format verbs map onto their arguments, and where the scoring
 // rubric sits relative to the code.

@@ -209,7 +209,6 @@ func (b *OllamaBackend) HandleVerifyFinding(ctx context.Context, req *RequestEnv
 	}
 
 	genOptions := map[string]any{
-		"temperature": 0.1,
 		"num_predict": 200,
 	}
 	if b.catalog != nil {
@@ -219,6 +218,20 @@ func (b *OllamaBackend) HandleVerifyFinding(ctx context.Context, req *RequestEnv
 			}
 		}
 	}
+
+	// Deterministic decoding is a property of the audit, not of a model: the same
+	// finding has to yield the same verdict, because a verdict that drifts to
+	// MALICIOUS is what assist + failClosed turns into a blocked import, on code
+	// that never changed. Measured on the five real findings at 20 samples each,
+	// temperature 0.1 produced between 2 and 15 distinct completions per prompt;
+	// 0 produced exactly one.
+	//
+	// Set here, after the catalog merge, rather than in the catalog itself. The
+	// merge above copies a profile's options over this map, so a per-model
+	// temperature can silently re-randomise the audit - which is how the same 0.1
+	// came to be duplicated across the built-in catalog, the JSON catalog and this
+	// file, with only whichever one merged last actually mattering.
+	genOptions["temperature"] = 0.0
 	if req.Policy.Temperature != nil {
 		genOptions["temperature"] = *req.Policy.Temperature
 	}
