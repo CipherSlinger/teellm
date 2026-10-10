@@ -95,17 +95,20 @@ banner() {
   echo -e "${CYAN}╰───────────────────────────────────────────────────────────────────╯${NC}"
 }
 
+# Messages may carry color codes of their own (e.g. a dimmed "(took 3s)" suffix). printf
+# expands backslash escapes only in the format string, so passing such a message through %s
+# prints the escapes literally. Route the message through %b to have them interpreted.
 step() {
   STEP=$((STEP + 1))
   CURRENT_STEP_NAME="$1"
   LAST_FAILED_TASK=""
-  printf "  ${PURPLE}◆${NC} ${CYAN}[%02d]${NC} ${BOLD}%s${NC}\n" "$STEP" "$1"
+  printf "  ${PURPLE}◆${NC} ${CYAN}[%02d]${NC} ${BOLD}%b${NC}\n" "$STEP" "$1"
 }
 
-info()    { printf "   ${GREEN}✓${NC} %s\n" "$1"; }
-warn()    { printf "   ${YELLOW}⚠${NC} %s\n" "$1"; }
-err()     { printf "   ${RED}✗${NC} %s\n" "$1" >&2; }
-detail()  { printf "     ${MUTED}↳ %s${NC}\n" "$1"; }
+info()    { printf "   ${GREEN}✓${NC} %b\n" "$1"; }
+warn()    { printf "   ${YELLOW}⚠${NC} %b\n" "$1"; }
+err()     { printf "   ${RED}✗${NC} %b\n" "$1" >&2; }
+detail()  { printf "     ${MUTED}↳ %b${NC}\n" "$1"; }
 
 spin_task() {
   local label="$1"
@@ -1691,7 +1694,9 @@ deploy_docker() {
     info "restored $soname_links ollama soname symlink(s) in $CONTAINER_OLLAMA_DIR/lib/ollama"
   fi
 
-  # Compatibility symlinks
+  # Legacy path compatibility symlinks. The bundle used to live at these two paths (the image
+  # still creates /taatest), so point both at wherever CONTAINER_OLLAMA_DIR is now. This has
+  # nothing to do with the dynamic linker -- see ollama_soname_fix_script above for that.
   local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
   if [[ "$CONTAINER_OLLAMA_DIR" != "$hardcoded_path" ]]; then
     step "creating compatibility symlink: $hardcoded_path"
@@ -1980,7 +1985,9 @@ copy_ollama_to_remote_pod() {
     info "restored $remote_soname_links ollama soname symlink(s) in $CONTAINER_OLLAMA_DIR/lib/ollama"
   fi
 
-  # Dynamic linker compatibility symlinks
+  # Legacy path compatibility symlinks. The bundle used to live at these two paths (the image
+  # still creates /taatest), so point both at wherever CONTAINER_OLLAMA_DIR is now. This has
+  # nothing to do with the dynamic linker -- see ollama_soname_fix_script above for that.
   local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
   if [[ "$CONTAINER_OLLAMA_DIR" != "$hardcoded_path" ]]; then
     remote_ssh "$(container_exec) sh -lc 'mkdir -p /taatest && ln -sfn \"$CONTAINER_OLLAMA_DIR\" \"$hardcoded_path\"'"
