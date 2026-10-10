@@ -216,7 +216,10 @@ require_command() {
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Docker runtime settings
-LOCAL_DOCKER_CONTAINER="${LOCAL_DOCKER_CONTAINER:-taa-env-slim-v2}"
+# The TEE-LLM service runs in its own container, separate from TAA, so that the two
+# processes no longer share a network namespace: TAA reaches the gateway by container
+# IP instead of 127.0.0.1.
+LOCAL_DOCKER_CONTAINER="${LOCAL_DOCKER_CONTAINER:-taa-teellm}"
 CON_WORKDIR="${CON_WORKDIR:-/root/taa}"
 CONTAINER_OLLAMA_DIR="${CONTAINER_OLLAMA_DIR:-/root/taa/ollama}"
 
