@@ -1694,19 +1694,6 @@ deploy_docker() {
     info "restored $soname_links ollama soname symlink(s) in $CONTAINER_OLLAMA_DIR/lib/ollama"
   fi
 
-  # Legacy path compatibility symlinks. The bundle used to live at these two paths (the image
-  # still creates /taatest), so point both at wherever CONTAINER_OLLAMA_DIR is now. This has
-  # nothing to do with the dynamic linker -- see ollama_soname_fix_script above for that.
-  local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
-  if [[ "$CONTAINER_OLLAMA_DIR" != "$hardcoded_path" ]]; then
-    step "creating compatibility symlink: $hardcoded_path"
-    docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "mkdir -p /taatest && rm -rf '$hardcoded_path' && ln -s '$CONTAINER_OLLAMA_DIR' '$hardcoded_path'"
-  fi
-  local legacy_container_path="$CON_WORKDIR/ollama-qwen2.5-coder-0.5b"
-  if [[ "$CONTAINER_OLLAMA_DIR" != "$legacy_container_path" ]]; then
-    docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "rm -rf '$legacy_container_path' && ln -s '$CONTAINER_OLLAMA_DIR' '$legacy_container_path'"
-  fi
-
   # Start Ollama daemon
   step "checking ollama daemon status inside container"
   local ollama_already_running=false
@@ -1919,11 +1906,14 @@ copy_ollama_to_remote_pod() {
   remote_ssh "$(container_exec) sh -lc 'command -v tar >/dev/null 2>&1 || { echo kubectl exec requires tar inside container; exit 1; }'"
   remote_ssh "command -v tar >/dev/null 2>&1 || { echo remote tar is required; exit 1; }"
 
+  # Ollama used to live under this name. A pod deployed before the rename still has it as a real
+  # directory, so move it into place instead of streaming several GB again. The is-not-a-symlink
+  # guard skips pods that carry an alias left behind by an older revision of this script.
   local legacy_container_path="$CON_WORKDIR/ollama-qwen2.5-coder-0.5b"
   if [[ "$CONTAINER_OLLAMA_DIR" != "$legacy_container_path" ]]; then
     if remote_ssh "$(container_exec) sh -lc 'test -d \"$legacy_container_path/lib/ollama\" && ! test -L \"$legacy_container_path\" && ! test -d \"$CONTAINER_OLLAMA_DIR/lib/ollama\"'" >/dev/null 2>&1; then
       info "migrating existing ollama runtime from $legacy_container_path to $CONTAINER_OLLAMA_DIR"
-      remote_ssh "$(container_exec) sh -lc 'mkdir -p \"$CON_WORKDIR\" && if [ ! -d \"$CONTAINER_OLLAMA_DIR\" ]; then mv \"$legacy_container_path\" \"$CONTAINER_OLLAMA_DIR\"; ln -s \"$CONTAINER_OLLAMA_DIR\" \"$legacy_container_path\"; elif [ ! -d \"$CONTAINER_OLLAMA_DIR/lib\" ]; then cp -r -n \"$legacy_container_path/lib\" \"$CONTAINER_OLLAMA_DIR/\"; fi'"
+      remote_ssh "$(container_exec) sh -lc 'mkdir -p \"$CON_WORKDIR\" && if [ ! -d \"$CONTAINER_OLLAMA_DIR\" ]; then mv \"$legacy_container_path\" \"$CONTAINER_OLLAMA_DIR\"; elif [ ! -d \"$CONTAINER_OLLAMA_DIR/lib\" ]; then cp -r -n \"$legacy_container_path/lib\" \"$CONTAINER_OLLAMA_DIR/\"; fi'"
     fi
   fi
 
@@ -1983,17 +1973,6 @@ copy_ollama_to_remote_pod() {
   remote_soname_links="$(remote_ssh "$(container_exec) sh -lc '$(ollama_soname_fix_script)' sh '$CONTAINER_OLLAMA_DIR/lib/ollama'" 2>/dev/null || echo 0)"
   if [[ "${remote_soname_links:-0}" != "0" ]]; then
     info "restored $remote_soname_links ollama soname symlink(s) in $CONTAINER_OLLAMA_DIR/lib/ollama"
-  fi
-
-  # Legacy path compatibility symlinks. The bundle used to live at these two paths (the image
-  # still creates /taatest), so point both at wherever CONTAINER_OLLAMA_DIR is now. This has
-  # nothing to do with the dynamic linker -- see ollama_soname_fix_script above for that.
-  local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
-  if [[ "$CONTAINER_OLLAMA_DIR" != "$hardcoded_path" ]]; then
-    remote_ssh "$(container_exec) sh -lc 'mkdir -p /taatest && ln -sfn \"$CONTAINER_OLLAMA_DIR\" \"$hardcoded_path\"'"
-  fi
-  if [[ "$CONTAINER_OLLAMA_DIR" != "$legacy_container_path" ]]; then
-    remote_ssh "$(container_exec) sh -lc 'ln -sfn \"$CONTAINER_OLLAMA_DIR\" \"$legacy_container_path\"'"
   fi
 
   info "ollama runtime and model '$OLLAMA_MODEL' verified inside remote pod"
