@@ -263,6 +263,32 @@ container_cp() {
   echo "kubectl $K_NS cp '$1' '$TARGET_POD':'$2'"
 }
 
+# llama-server links against the soname forms of its libraries (libllama-common.so.0,
+# libllama.so.0, libmtmd.so.0, libggml.so.0, libggml-base.so.0) and carries RUNPATH=$ORIGIN,
+# so the loader looks for those exact names next to the binary. The offline ollama bundle
+# ships only the fully versioned files (libllama-common.so.0.1.2, ...), so the lookup misses,
+# the binary exits 127, ollama answers 500 and teellm's healthz reports 503. Recreate the
+# soname symlinks from whatever versions the bundle actually carries, so this keeps working
+# across bundle upgrades. The caller passes the lib directory as the first argument; the
+# script prints how many links it created.
+ollama_soname_fix_script() {
+  cat <<'SONAME_FIX'
+d="$1"
+n=0
+for f in "$d"/lib*.so.*; do
+  [ -e "$f" ] || continue
+  [ -L "$f" ] && continue
+  b="${f##*/}"
+  stem="${b%%.so.*}"
+  rest="${b#*.so.}"
+  [ "$rest" = "$b" ] && continue
+  s="$stem.so.${rest%%.*}"
+  if [ ! -e "$d/$s" ]; then ln -sf "$b" "$d/$s"; n=$((n+1)); fi
+done
+echo "$n"
+SONAME_FIX
+}
+
 ensure_remote_ssh() {
   if [[ "$DEPLOY_DOCKER" == true ]]; then
     return 0
@@ -1658,6 +1684,13 @@ deploy_docker() {
 
   docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "chmod +x '$CONTAINER_OLLAMA_DIR/ollama' '$CONTAINER_OLLAMA_DIR/start-ollama.sh' '$CONTAINER_OLLAMA_DIR/lib/ollama/llama-'* 2>/dev/null || true"
 
+  # Restore the soname symlinks llama-server needs; the bundle ships versioned files only.
+  local soname_links
+  soname_links="$(docker exec -i "$LOCAL_DOCKER_CONTAINER" sh -lc "$(ollama_soname_fix_script)" sh "$CONTAINER_OLLAMA_DIR/lib/ollama" 2>/dev/null || echo 0)"
+  if [[ "${soname_links:-0}" != "0" ]]; then
+    info "restored $soname_links ollama soname symlink(s) in $CONTAINER_OLLAMA_DIR/lib/ollama"
+  fi
+
   # Compatibility symlinks
   local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
   if [[ "$CONTAINER_OLLAMA_DIR" != "$hardcoded_path" ]]; then
@@ -1939,6 +1972,13 @@ copy_ollama_to_remote_pod() {
   fi
 
   remote_ssh "$(container_exec) sh -lc 'chmod +x \"$CONTAINER_OLLAMA_DIR/ollama\" \"$CONTAINER_OLLAMA_DIR/start-ollama.sh\" \"$CONTAINER_OLLAMA_DIR/lib/ollama/llama-\"* 2>/dev/null || true'"
+
+  # Restore the soname symlinks llama-server needs; the bundle ships versioned files only.
+  local remote_soname_links
+  remote_soname_links="$(remote_ssh "$(container_exec) sh -lc '$(ollama_soname_fix_script)' sh '$CONTAINER_OLLAMA_DIR/lib/ollama'" 2>/dev/null || echo 0)"
+  if [[ "${remote_soname_links:-0}" != "0" ]]; then
+    info "restored $remote_soname_links ollama soname symlink(s) in $CONTAINER_OLLAMA_DIR/lib/ollama"
+  fi
 
   # Dynamic linker compatibility symlinks
   local hardcoded_path="/taatest/ollama-qwen2.5-coder-0.5b"
