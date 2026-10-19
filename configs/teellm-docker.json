@@ -8,7 +8,7 @@
   "backend": {
     "type": "ollama",
     "endpoint": "http://127.0.0.1:11434",
-    "defaultModel": "qwen2.5-coder:3b",
+    "defaultModel": "qwen2.5-coder:7b",
     "modelCatalogPath": "./configs/models.json",
     "timeoutSeconds": 100
   },
