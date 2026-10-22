@@ -212,10 +212,11 @@ func main() {
 		InsecureSkipAttestationVerify: true,
 	}
 
+	// A zero backend timeout means no deadline. It must not be replaced by a
+	// fallback: a CPU-only 7B model needs minutes for an audit verdict, and a
+	// fallback here turns that into a 500 the caller reads as "service
+	// unavailable".
 	backendTimeout := time.Duration(cfg.Backend.TimeoutSeconds) * time.Second
-	if backendTimeout <= 0 {
-		backendTimeout = 60 * time.Second
-	}
 
 	catalog, err := teellm.LoadModelCatalog(cfg.Backend.ModelCatalogPath)
 	if err != nil {

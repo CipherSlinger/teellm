@@ -86,11 +86,10 @@ func NewOllamaBackend(cfg OllamaBackendConfig) (*OllamaBackend, error) {
 		model = "qwen2.5-coder:3b"
 	}
 
+	// A zero timeout is deliberate: generation on a CPU-only host takes as long
+	// as it takes, and the caller's own context (or a configured deadline)
+	// governs cancellation.
 	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{

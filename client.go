@@ -39,8 +39,11 @@ const DefaultHealthCheckTimeout = 120 * time.Second
 // Config configures the TEE-LLM client.
 type Config struct {
 	Endpoint string
-	// Timeout bounds an ordinary request. It does not bound a health check;
-	// see HealthCheckTimeout.
+	// Timeout bounds an ordinary request. Zero means no deadline: generation
+	// time is a property of the deployment's hardware and model, and cutting a
+	// request short mid-generation is indistinguishable, to the caller, from
+	// the service being unavailable. It does not bound a health check; see
+	// HealthCheckTimeout.
 	Timeout                        time.Duration
 	HealthCheckTimeout             time.Duration
 	AllowedHosts                   []string
@@ -88,9 +91,9 @@ func NewClient(cfg Config) (Client, error) {
 	if cfg.RetryMaxDelay <= 0 {
 		cfg.RetryMaxDelay = 2 * time.Second
 	}
-	if cfg.Timeout <= 0 {
-		cfg.Timeout = 10 * time.Second
-	}
+	// cfg.Timeout is left untouched: zero is the zero value of http.Client's
+	// timeout, which means "no deadline", and that is the intended default
+	// rather than a configuration mistake to correct.
 	if cfg.HealthCheckTimeout <= 0 {
 		cfg.HealthCheckTimeout = DefaultHealthCheckTimeout
 	}
