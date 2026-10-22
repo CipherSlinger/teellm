@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # TEE-LLM autostart wrapper: ensures ollama is active, starts teellm-service, retries on exit.
-# Manual mode: touch /root/taa/manual or /root/taa/manual-teellm to pause; rm to resume.
+# Manual mode: touch /opt/teellm/manual or /opt/teellm/manual-teellm to pause; rm to resume.
 set -u
-cd /root/taa || exit 1
-LOG=/root/taa/teellm-service.log
-LOCK=/root/taa/.start-teellm.lock
-OLLAMA_DIR="${OLLAMA_DIR:-/root/taa/ollama}"
+cd /opt/teellm || exit 1
+LOG=/opt/teellm/teellm-service.log
+LOCK=/opt/teellm/.start-teellm.lock
+OLLAMA_DIR="${OLLAMA_DIR:-/opt/teellm/ollama}"
 OLLAMA_HOST="127.0.0.1:11434"
 TEEPID=""
 
@@ -49,7 +49,7 @@ ensure_ollama() {
   fi
   if [ -x "${OLLAMA_DIR}/start-ollama.sh" ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): starting ollama daemon via ${OLLAMA_DIR}/start-ollama.sh" >> "$LOG"
-    (cd "$OLLAMA_DIR" && exec ./start-ollama.sh >> /root/taa/ollama.log 2>&1) 9>&- &
+    (cd "$OLLAMA_DIR" && exec ./start-ollama.sh >> /opt/teellm/ollama.log 2>&1) 9>&- &
     for _ in {1..30}; do
       if curl -fsS "http://${OLLAMA_HOST}/api/tags" >/dev/null 2>&1; then
         echo "$(date -u +%Y-%m-%dT%H:%M:%SZ): ollama daemon ready" >> "$LOG"

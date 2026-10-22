@@ -15,7 +15,7 @@
   "attestation": {
     "mode": "permissive",
     "mock": false,
-    "hrkCertPath": "/root/taa/certs/hrk.cert",
-    "hskCekCertPath": "/root/taa/certs/hsk_cek.cert"
+    "hrkCertPath": "/opt/teellm/certs/hrk.cert",
+    "hskCekCertPath": "/opt/teellm/certs/hsk_cek.cert"
   }
 }
