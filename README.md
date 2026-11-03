@@ -135,7 +135,7 @@ All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
 | Path | Method | Purpose |
 |------|--------|---------|
 | `/v1/llm/generate` | POST | Generic inference: prompt in, raw text out |
-| `/v1/llm/healthz` | GET | Readiness: runs a one-token inference on the default model, so a cold or not-yet-loaded model answers 503 |
+| `/v1/llm/healthz` | GET | Readiness: blocks on a one-token inference on the default model until it completes or the backend timeout fires, and only then answers 503 if the probe failed - so a cold or not-yet-loaded model holds the request open while it loads |
 | `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
 
 The service knows nothing about the caller's task. Sampling options
@@ -244,7 +244,7 @@ All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
 | Path | Method | Purpose |
 |------|--------|---------|
 | `/v1/llm/generate` | POST | Generic inference: prompt in, raw text out |
-| `/v1/llm/healthz` | GET | Readiness: runs a one-token inference on the default model, so a cold or not-yet-loaded model answers 503 |
+| `/v1/llm/healthz` | GET | Readiness: blocks on a one-token inference on the default model until it completes or the backend timeout fires, and only then answers 503 if the probe failed - so a cold or not-yet-loaded model holds the request open while it loads |
 | `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
 
 `/v1/llm/getAttestation` is mounted on the same TEE-TLS listener as the other

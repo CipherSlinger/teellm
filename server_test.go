@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,50 @@ func TestGenerateHandlerReturnsText(t *testing.T) {
 	}
 	if backend.gotReq == nil || backend.gotReq.Prompt != "hello" {
 		t.Fatalf("backend saw %+v", backend.gotReq)
+	}
+}
+
+func TestHandleGenerateRejectsOversizedBody(t *testing.T) {
+	srv := newPlainServer(t, &stubBackend{})
+	body, err := json.Marshal(GenerateRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+		RequestID:       "r1",
+		Prompt:          strings.Repeat("a", MaxRequestPayloadBytes),
+	})
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if len(body) <= MaxRequestPayloadBytes {
+		t.Fatalf("test body is %d bytes, want > %d", len(body), MaxRequestPayloadBytes)
+	}
+
+	resp, err := http.Post("http://"+srv.Addr()+"/v1/llm/generate", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	var got GenerateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if got.Status != StatusInvalidRequest {
+		t.Fatalf("status = %q, want %q", got.Status, StatusInvalidRequest)
+	}
+}
+
+func TestHandleGenerateRejectsWrongMethod(t *testing.T) {
+	srv := newPlainServer(t, &stubBackend{})
+	resp, err := http.Get("http://" + srv.Addr() + "/v1/llm/generate")
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
 	}
 }
 
