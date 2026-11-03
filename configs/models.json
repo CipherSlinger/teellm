@@ -12,7 +12,7 @@
         "num_ctx": 2048,
         "num_predict": 160
       },
-      "description": "Ultra-lightweight model for fast rule pre-screening (1-2s response)"
+      "description": "Ultra-lightweight model for short prompts (1-2s response)"
     },
     "qwen2.5-coder:1.5b": {
       "family": "qwen2.5-coder",
@@ -36,7 +36,7 @@
         "num_ctx": 4096,
         "num_predict": 256
       },
-      "description": "Code specialized model with high precision on AST and sensitive sink analysis"
+      "description": "Code-specialized model for precise analysis of larger source excerpts"
     },
     "qwen2.5-coder:7b": {
       "family": "qwen2.5-coder",
@@ -48,7 +48,7 @@
         "num_ctx": 4096,
         "num_predict": 300
       },
-      "description": "Deep code security audit model for extensive multi-file contexts"
+      "description": "Higher-capacity code model for long prompts spanning multiple files"
     },
     "qwen3:8b": {
       "family": "qwen3",
@@ -61,7 +61,7 @@
         "think": false,
         "num_predict": 300
       },
-      "description": "General high-capacity reasoning model with strict security boundaries"
+      "description": "General high-capacity reasoning model for longer, open-ended prompts"
     },
     "qwen3:14b": {
       "family": "qwen3",
@@ -74,7 +74,7 @@
         "think": false,
         "num_predict": 512
       },
-      "description": "High precision model for deep offline compliance verification"
+      "description": "High-precision model for deep analysis of long inputs"
     }
   }
 }
