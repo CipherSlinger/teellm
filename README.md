@@ -3,9 +3,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/CipherSlinger/teellm.svg)](https://pkg.go.dev/github.com/CipherSlinger/teellm)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-`teellm` provides confidential AI inference capabilities over RFC 8998 ShangMi (SM2/SM3/SM4) TEE-TLS 1.3 channels. It is designed to secure communication between auditing agents or user workloads and LLM inference endpoints operating inside hardware-isolated Trusted Execution Environments (TEEs).
+`teellm` provides confidential AI inference over RFC 8998 ShangMi (SM2/SM3/SM4) TEE-TLS 1.3 channels. It runs inside a hardware-isolated Trusted Execution Environment (TEE) and turns a prompt into the model's raw text.
 
-The project combines hardware-rooted remote attestation (supporting Hygon CSV, AMD SEV, and Intel SGX attestation evidence formats via `teetls`), strict SSRF defenses, an extensible backend adapter architecture (including native Ollama integration), and enterprise resilience patterns (circuit breakers, exponential backoff, and full jitter retries).
+The project combines hardware-rooted remote attestation (Hygon CSV, AMD SEV and Intel SGX evidence formats, verified through `teetls`) with a thin inference gateway in front of a local Ollama daemon. The gateway is deliberately task-agnostic: prompts, sampling options and the interpretation of the model's output all belong to the caller.
 
 ---
 
@@ -17,17 +17,14 @@ The project combines hardware-rooted remote attestation (supporting Hygon CSV, A
 - **Hardware-Rooted Remote Attestation**:
   - Seamlessly integrates with `github.com/CipherSlinger/teetls` to verify hardware evidence (such as Hygon CSV guest reports and certificates).
   - Measurement verification in Strict mode (enforcing exact launch hashes) or Permissive mode (logging discrepancies for security audits).
-- **Extensible Backend Architecture**:
-  - Modular `Backend` interface decoupling the network protocol from underlying LLM runtime engines.
-  - Native `OllamaBackend` adapter supporting local model serving (e.g., `qwen2.5-coder:3b`), prompt templating, and structured JSON output parsing.
-- **Production-Grade Resilience**:
-  - **Circuit Breaker**: Detects downstream model failure or timeout spikes and enters Open/Half-Open states to avoid cascading failures.
-  - **Exponential Backoff with Full Jitter**: Mitigates thundering-herd issues during retries.
-  - **Strict SSRF Defenses**: Disallows plain HTTP, loopback/private CIDRs unless explicitly whitelisted, and cloud metadata IP ranges (`169.254.169.254`).
-  - **Payload Guardrails**: Enforces 1MB request/response envelope bounds to prevent resource exhaustion.
-- **Flexible Deployment**:
-  - Usable directly as a Go client library in your applications.
-  - Shippable as a standalone microservice daemon (`bin/teellm-service`) with CLI flags and readiness probing.
+- **Task-Agnostic Backend Interface**:
+  - The `Backend` interface is just `Generate` + `HandleHealthCheck`, decoupled from the wire protocol; the service never inspects the prompt or parses the model's output.
+- **Native Ollama Adapter**:
+  - `OllamaBackend` forwards the prompt and the caller's `options` to Ollama unchanged, applying only the service default and the model catalog's profile as fallbacks.
+- **Payload Guardrails**:
+  - Enforces a 1MB request body bound to prevent resource exhaustion.
+- **Standalone Daemon**:
+  - Shippable as a standalone microservice daemon (`bin/teellm-service`) with CLI flags and a readiness probe.
 
 ---
 
@@ -38,9 +35,9 @@ The project combines hardware-rooted remote attestation (supporting Hygon CSV, A
  |                         Client Node                         |
  |                                                             |
  |   +-----------------------------------------------------+   |
- |   |                   teellm.Client                     |   |
- |   |  - SSRF Validator       - Circuit Breaker           |   |
- |   |  - Full Jitter Retry    - Envelope Encoder/Decoder  |   |
+ |   |            TEE-TLS Client (e.g. TAA)                |   |
+ |   |  - Builds the prompt    - Consumes the raw text     |   |
+ |   |  - teetls.NewHTTPClient                             |   |
  |   +-----------------------------------------------------+   |
  |                              |                              |
  |                              v                              |
@@ -66,14 +63,16 @@ The project combines hardware-rooted remote attestation (supporting Hygon CSV, A
  |                              v                              |
  |   +-----------------------------------------------------+   |
  |   |                    teellm.Server                    |   |
- |   |  - HTTP/1.1 Endpoint (/v1/llm/verify, /v1/llm/healthz) |   |
+ |   |  - HTTP/1.1 Endpoint                                |   |
  |   |  - 1MB Payload Limiter                              |   |
+ |   |  - /v1/llm/generate, /v1/llm/healthz,               |   |
+ |   |    /v1/llm/getAttestation                           |   |
  |   +-----------------------------------------------------+   |
  |                              |                              |
  |                              v                              |
  |   +-----------------------------------------------------+   |
  |   |                 OllamaBackendAdapter                |   |
- |   |  - Prompt Synthesis     - Structured JSON Parser    |   |
+ |   |  - Options Merge / Ollama Dispatch                  |   |
  |   +-----------------------------------------------------+   |
  |                              |                              |
  |                              v                              |
@@ -90,120 +89,117 @@ The project combines hardware-rooted remote attestation (supporting Hygon CSV, A
 
 ```
 teellm/
-├── circuit_breaker.go     # Thread-safe circuit breaker implementation
-├── client.go              # TEE-LLM client SDK and configuration
+├── attestation.go          # getAttestation endpoint and CSV report snapshot
+├── attestation_test.go     # Attestation endpoint tests
 ├── cmd/
-│   └── teellm-service/    # Standalone microservice daemon CLI
-│       ├── main.go        # Entrypoint with flags, probe mode, and signals
-│       └── main_test.go   # Integration tests for daemon probe mode
-├── go.mod                 # Go module definition (go 1.22)
-├── go.sum                 # Dependency checksums
-├── LICENSE                # Apache-2.0 License
-├── ollama_backend.go      # Backend adapter dispatching to Ollama API
-├── ollama_backend_test.go # Unit tests for Ollama backend integration
-├── README.md              # Project documentation
-├── resilience_test.go     # Circuit breaker and jitter retry test suite
-├── retry.go               # Exponential backoff with full jitter
-├── server.go              # TEE-LLM HTTPS server and router
-├── teellm_test.go         # End-to-end client-server and SSRF tests
-├── teetls/                # Git submodule providing RFC 8998 TEE-TLS
-├── types.go               # Protocol envelopes and data transfer objects
-├── types_test.go          # Serialization and envelope validation tests
-└── validator.go           # SSRF validator for target inference endpoints
+│   └── teellm-service/     # Standalone microservice daemon CLI
+│       ├── main.go         # Entrypoint with flags, probe mode, and signals
+│       └── main_test.go    # Config, flag and probe mode tests
+├── go.mod                  # Go module definition (go 1.22)
+├── go.sum                  # Dependency checksums
+├── LICENSE                 # Apache-2.0 License
+├── model_catalog.go        # Model profiles and per-model option defaults
+├── model_catalog_test.go   # Catalog loading and fallback tests
+├── ollama_backend.go       # Backend adapter dispatching to Ollama
+├── ollama_backend_test.go  # Option merge and health check tests
+├── platformagent/          # Outbound registration, heartbeat and log reporting
+│   ├── attestation.go
+│   ├── config.go
+│   ├── heartbeat.go
+│   ├── logs.go
+│   ├── logs_test.go
+│   ├── register.go
+│   ├── reporter.go
+│   └── reporter_test.go
+├── README.md               # Project documentation
+├── server.go               # TEE-TLS HTTPS server and router
+├── server_test.go          # Generate endpoint tests
+├── teetls/                 # Git submodule providing RFC 8998 TEE-TLS
+└── types.go                # Protocol request and response types
 ```
 
 ---
 
-## Usage as a Client Library
+## Wire Protocol
 
-### 1. Initializing the Client
+All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
+
+| Path | Method | Purpose |
+|------|--------|---------|
+| `/v1/llm/generate` | POST | Generic inference: prompt in, raw text out |
+| `/v1/llm/healthz` | GET | Readiness |
+| `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
+
+The service knows nothing about the caller's task. Sampling options
+(`temperature`, `num_predict`, ...) travel in the request's `options` object and
+override the model catalog's profile defaults; whatever they are, the service
+passes them through to Ollama unchanged.
+
+Request and response:
+
+```json
+{"protocolVersion":"teellm-protocol/v1","requestId":"r1","model":"qwen2.5-coder:3b","prompt":"...","options":{"temperature":0}}
+```
+
+```json
+{"protocolVersion":"teellm-protocol/v1","requestId":"r1","status":"SUCCESS","model":"qwen2.5-coder:3b","text":"..."}
+```
+
+- `model` may be omitted; the service then uses its configured default model.
+- Options merge in this order: the service's `num_predict` default, then the
+  model catalog's profile for the chosen model, then the request's own
+  `options`. The request wins.
+- Failures return the same envelope with `status` and `errorMessage` set. The
+  protocol defines `INVALID_REQUEST`, `MODEL_NOT_FOUND`, `INTERNAL_ERROR` and
+  `SERVICE_UNAVAILABLE`; the service currently emits `INVALID_REQUEST` for
+  malformed JSON, an empty prompt or a body over 1MB, and `INTERNAL_ERROR` when
+  the backend fails.
+
+There is no client SDK: callers use `teetls.NewHTTPClient` and POST JSON
+directly.
 
 ```go
 package main
 
 import (
-	"context"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"time"
 
-	"github.com/CipherSlinger/teellm"
 	"github.com/CipherSlinger/teetls"
 )
 
 func main() {
-	// Configure TEE-TLS verification parameters
-	teeTLSConfig := &teetls.Config{
+	// Generation can take minutes on a CPU-only host; teetls.NewHTTPClient
+	// defaults to a 10-second timeout, so raise it explicitly.
+	client := teetls.NewHTTPClient(&teetls.Config{
 		Mode:                 teetls.ModeStrict,
-		ExpectedMeasurements: []string{
-			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
-	}
+		ExpectedMeasurements: []string{"<SM3 measurement hex>"},
+		Timeout:              120 * time.Second,
+	})
 
-	// Initialize the TEE-LLM client
-	client, err := teellm.NewClient(teellm.Config{
-		Endpoint:                       "https://enclave.service.local:8443",
-		Timeout:                        30 * time.Second,
-		AllowedHosts:                   []string{"enclave.service.local"},
-		TEETLS:                         teeTLSConfig,
-		CircuitBreakerFailureThreshold: 3,
-		CircuitBreakerCooldown:         30 * time.Second,
-		MaxRetries:                     3,
-		RetryBaseDelay:                 100 * time.Millisecond,
-		RetryMaxDelay:                  2 * time.Second,
+	body, err := json.Marshal(map[string]any{
+		"protocolVersion": "teellm-protocol/v1",
+		"requestId":       "r1",
+		"prompt":          "Return the word OK.",
+		"options":         map[string]any{"temperature": 0},
 	})
 	if err != nil {
-		log.Fatalf("failed to initialize client: %v", err)
+		log.Fatal(err)
 	}
-	defer client.Close()
 
-	// Verify health of target endpoint
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.HealthCheck(ctx); err != nil {
-		log.Fatalf("service health check failed: %v", err)
+	resp, err := client.Post("https://enclave.service.local:8443/v1/llm/generate", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Fatal(err)
 	}
-	fmt.Println("Connected to verified TEE enclave successfully.")
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	fmt.Printf("%s\n", data)
 }
-```
-
-### 2. Submitting an Audit Finding for Verification
-
-```go
-req := &teellm.RequestEnvelope{
-	ProtocolVersion: teellm.CurrentProtocolVersion,
-	RequestID:       "req-001",
-	Timestamp:       time.Now().Unix(),
-	Nonce:           "random-nonce-1234",
-	DeadlineMs:      5000,
-	Action:          teellm.ActionVerifyFinding,
-	ModelRef: &teellm.ModelReference{
-		Name: "qwen2.5-coder:3b",
-	},
-	Policy: teellm.PolicyOptions{
-		Mode: teellm.PolicyModeGate,
-	},
-	FindingPayload: &teellm.FindingPayload{
-		RuleID:      "DYN_001",
-		Category:    "DYNAMIC_EXEC",
-		Severity:    "HIGH",
-		Description: "Detected dynamic module import in Python code",
-		Target: teellm.CodeTarget{
-			FilePath:    "scripts/runner.py",
-			Line:        42,
-			CodeSnippet: "mod = __import__(module_name)",
-		},
-	},
-}
-
-resp, err := client.VerifyFinding(context.Background(), req)
-if err != nil {
-	log.Fatalf("verification error: %v", err)
-}
-
-fmt.Printf("Verdict: %s (Confidence: %.2f)\n", resp.Decision.Verdict, resp.Decision.Confidence)
-fmt.Printf("Explanation: %s\n", resp.Decision.Explanation)
 ```
 
 ---
@@ -236,7 +232,7 @@ All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
 
 | Path | Method | Purpose |
 |------|--------|---------|
-| `/v1/llm/verify` | POST | Finding verification |
+| `/v1/llm/generate` | POST | Generic inference: prompt in, raw text out |
 | `/v1/llm/healthz` | GET | Readiness |
 | `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
 
@@ -298,7 +294,7 @@ You can use the built-in probe mode in health check scripts or container livenes
 
 ## Testing
 
-Run the full test suite covering end-to-end handshakes, circuit breaking, SSRF defenses, and backend adaptors:
+Run the full test suite covering the TEE-TLS handshake and attestation endpoint, the generate endpoint, the Ollama adapter's option merge and health check, and platform registration/heartbeat/log reporting:
 
 ```bash
 go test -v ./...
