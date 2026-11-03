@@ -58,8 +58,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/verify", s.handleVerify)
-	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/v1/llm/verify", s.handleVerify)
+	mux.HandleFunc("/v1/llm/healthz", s.handleHealthz)
 
 	s.httpSrv = &http.Server{
 		Handler: mux,
@@ -68,7 +68,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
-// handleVerify handles finding verification requests under POST /v1/verify.
+// handleVerify handles finding verification requests under POST /v1/llm/verify.
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -133,7 +133,7 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// handleHealthz handles health check queries under GET /healthz.
+// handleHealthz handles health check queries under GET /v1/llm/healthz.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

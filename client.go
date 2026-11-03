@@ -28,7 +28,7 @@ const MaxResponsePayloadBytes = 1 << 20
 // DefaultHealthCheckTimeout is the budget a health check gets when the caller
 // sets no HealthCheckTimeout of its own.
 //
-// It is far longer than an ordinary request timeout because /healthz is not a
+// It is far longer than an ordinary request timeout because /v1/llm/healthz is not a
 // ping: the service answers it only once the model is loaded, which on a cold
 // service is seconds of disk and memory work. Budgeting it like an ordinary
 // request yields a readiness gate a cold service can never pass - and retrying
@@ -149,7 +149,7 @@ func (c *client) VerifyFinding(ctx context.Context, req *RequestEnvelope) (*Resp
 
 	var respEnvelope *ResponseEnvelope
 	err = ExecuteWithRetryContext(ctx, c.cfg.MaxRetries, c.cfg.RetryBaseDelay, c.cfg.RetryMaxDelay, func(attempt int) error {
-		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/v1/verify", bytes.NewReader(reqBytes))
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"/v1/llm/verify", bytes.NewReader(reqBytes))
 		if reqErr != nil {
 			return reqErr
 		}
@@ -213,7 +213,7 @@ func (c *client) HealthCheck(ctx context.Context) error {
 	}
 
 	err := ExecuteWithRetryContext(ctx, c.cfg.MaxRetries, c.cfg.RetryBaseDelay, c.cfg.RetryMaxDelay, func(attempt int) error {
-		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/healthz", nil)
+		httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+"/v1/llm/healthz", nil)
 		if reqErr != nil {
 			return reqErr
 		}

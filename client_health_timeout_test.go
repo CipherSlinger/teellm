@@ -67,7 +67,7 @@ func startHealthTestServer(t *testing.T, delay, requestTimeout, healthTimeout ti
 }
 
 // TestHealthCheckOutlastsTheRequestTimeout is the property the readiness gate
-// needs. A cold service answers /healthz only after it has loaded the model,
+// needs. A cold service answers /v1/llm/healthz only after it has loaded the model,
 // which takes seconds - longer than a normal request may take. Sharing one
 // timeout with finder-verification calls makes the gate unwinnable on a cold
 // start: every attempt is cut off mid-load, and because the cutoff cancels the

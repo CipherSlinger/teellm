@@ -408,7 +408,7 @@ func TestTEELLM_ServerPayloadTooLarge(t *testing.T) {
 
 	// Send >1MB request body directly to plain HTTP server
 	hugeBody := bytes.Repeat([]byte("X"), 1048576+10)
-	resp, err := http.Post("http://"+srv.Addr()+"/v1/verify", "application/json", bytes.NewReader(hugeBody))
+	resp, err := http.Post("http://"+srv.Addr()+"/v1/llm/verify", "application/json", bytes.NewReader(hugeBody))
 	if err != nil {
 		t.Fatalf("post failed: %v", err)
 	}

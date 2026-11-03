@@ -278,7 +278,7 @@ func TestValidateEndpoint_AllowedHosts(t *testing.T) {
 	valid := []string{
 		"https://llm-service.trusted.cluster:8443",
 		"https://llm-service.trusted.cluster",
-		"https://localhost:8443/v1/verify",
+		"https://localhost:8443/v1/llm/verify",
 		"https://127.0.0.1:9443",
 	}
 	for _, ep := range valid {

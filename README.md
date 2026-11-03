@@ -66,7 +66,7 @@ The project combines hardware-rooted remote attestation (supporting Hygon CSV, A
  |                              v                              |
  |   +-----------------------------------------------------+   |
  |   |                    teellm.Server                    |   |
- |   |  - HTTP/1.1 Endpoint (/v1/verify, /healthz)         |   |
+ |   |  - HTTP/1.1 Endpoint (/v1/llm/verify, /v1/llm/healthz) |   |
  |   |  - 1MB Payload Limiter                              |   |
  |   +-----------------------------------------------------+   |
  |                              |                              |

@@ -116,7 +116,7 @@ func mergeConfigWithFlags(cfg *ServiceConfigFile, explicitFlags map[string]bool,
 //
 // It sits just above the client's health budget so that a backend that never
 // answers is reported as a health-check timeout rather than as an opaque
-// cancellation, and it is generous because /healthz loads the model on a cold
+// cancellation, and it is generous because /v1/llm/healthz loads the model on a cold
 // service: the probe deploys run is the very thing that warms it.
 const probeContextTimeout = teellm.DefaultHealthCheckTimeout + 10*time.Second
 
