@@ -8,13 +8,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 
 	"github.com/CipherSlinger/teetls"
 )
 
-// Backend defines the inference handler interface to be executed by the Server.
+// Backend defines the inference handler interface executed by the Server.
 type Backend interface {
-	HandleVerifyFinding(ctx context.Context, req *RequestEnvelope) (*ResponseEnvelope, error)
+	Generate(ctx context.Context, req *GenerateRequest) (*GenerateResponse, error)
 	HandleHealthCheck(ctx context.Context) error
 }
 
@@ -58,7 +59,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/llm/verify", s.handleVerify)
+	mux.HandleFunc("/v1/llm/generate", s.handleGenerate)
 	mux.HandleFunc("/v1/llm/healthz", s.handleHealthz)
 	mux.HandleFunc("/v1/llm/getAttestation", s.handleGetAttestation)
 
@@ -69,69 +70,71 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
-// handleVerify handles finding verification requests under POST /v1/llm/verify.
-func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+// handleGenerate handles POST /v1/llm/generate.
+func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	limited := io.LimitReader(r.Body, int64(MaxResponsePayloadBytes)+1)
+	limited := io.LimitReader(r.Body, int64(MaxRequestPayloadBytes)+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
 		http.Error(w, "read request body error", http.StatusBadRequest)
 		return
 	}
-	if len(body) > MaxResponsePayloadBytes {
-		resp := &ResponseEnvelope{
+	if len(body) > MaxRequestPayloadBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, &GenerateResponse{
 			ProtocolVersion: CurrentProtocolVersion,
 			Status:          StatusInvalidRequest,
 			ErrorMessage:    "request body exceeds 1MB limit",
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusRequestEntityTooLarge)
-		_ = json.NewEncoder(w).Encode(resp)
+		})
 		return
 	}
 
-	var req RequestEnvelope
+	var req GenerateRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		resp := &ResponseEnvelope{
+		writeJSON(w, http.StatusBadRequest, &GenerateResponse{
 			ProtocolVersion: CurrentProtocolVersion,
 			Status:          StatusInvalidRequest,
-			ErrorMessage:    "invalid request envelope JSON: " + err.Error(),
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(resp)
+			ErrorMessage:    "invalid request JSON: " + err.Error(),
+		})
+		return
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		writeJSON(w, http.StatusBadRequest, &GenerateResponse{
+			ProtocolVersion: CurrentProtocolVersion,
+			RequestID:       req.RequestID,
+			Status:          StatusInvalidRequest,
+			ErrorMessage:    "prompt must not be empty",
+		})
 		return
 	}
 
-	resp, err := s.backend.HandleVerifyFinding(r.Context(), &req)
+	resp, err := s.backend.Generate(r.Context(), &req)
 	if err != nil {
-		errResp := &ResponseEnvelope{
+		writeJSON(w, http.StatusInternalServerError, &GenerateResponse{
 			ProtocolVersion: CurrentProtocolVersion,
 			RequestID:       req.RequestID,
 			Status:          StatusInternalError,
 			ErrorMessage:    err.Error(),
-		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(w).Encode(errResp)
+		})
 		return
 	}
-
 	if resp == nil {
-		resp = &ResponseEnvelope{
+		resp = &GenerateResponse{
 			ProtocolVersion: CurrentProtocolVersion,
 			RequestID:       req.RequestID,
 			Status:          StatusSuccess,
 		}
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
+func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 // handleHealthz handles health check queries under GET /v1/llm/healthz.

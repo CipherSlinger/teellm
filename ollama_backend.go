@@ -12,49 +12,6 @@ import (
 	"time"
 )
 
-const findingAnalysisPromptTemplate = `你是一个代码安全审计专家。请分析以下代码片段是否存在窃取数据、外传数据或其他恶意行为。
-
-## 判定优先级与安全边界
-1. 恶意/可疑判定 (MALICIOUS 或 SUSPICIOUS)：
-   - 必须有上下文明确表明代码在窃取或外发凭据（密钥、令牌、密码、证书、私钥、敏感配置文件）；
-   - 或明确在通过未授权网络、隐写载荷、非法持久化通道外传真实的敏感原始数据/特征矩阵；
-   - 只有确凿恶意利用证据时才可判定为 MALICIOUS 或 SUSPICIOUS。
-
-2. 良性判定 (BENIGN)（严格消除训练与日志误报）：
-   - 日志与标准输出（如 EMB_003）：打印数据集名称/路径标识/类别标签/状态分隔线（例如 print(dataset + '--------')、print(dataset)）、打印训练批次统计、模型参数结构、计算进度、评估指标（如 accuracy、loss、AUC、sensitivity、specificity、F1-score、ci 置信区间等），均属完全正常的训练与科研评估日志，绝非敏感数据泄露，必须判为 BENIGN；
-   - 依赖检测与测试打桩（如 DYN_001）：在测试脚本（如 test_*.py）或顶层保护块中使用 __import__ 或 importlib.import_module 探测可选模块、或为缺失依赖（如 torch/numpy/tensorboardX）挂载 MagicMock 模拟对象，属于纯良性的测试用例兼容逻辑，绝非动态恶意执行，必须判为 BENIGN；
-   - 结果保存与导出（如 EMB_001/EMB_002/EMB_004）：正常保存训练生成的模型权重（如 torch.save(model.state_dict(), ...)）、导出评估图表（如 matplotlib/plt 保存 ROC 曲线或分布图）、写入评估结果指标文件，必须判为 BENIGN；
-   - 常规配置读取、环境参数封装、合法子进程参数调用等框架良性用法，必须判为 BENIGN。
-
-3. 不确定判定 (UNCERTAIN)：
-   - 仅在上下文严重缺失、证据不足且语义完全无法确认意图时返回。
-
-## 代码片段
-文件: %s (第 %d 行)
-` + "```python" + `
-%s
->>> %s   ← 触发规则的代码
-%s
-` + "```" + `
-
-## 触发的规则
-规则ID: %s
-类别: %s
-严重度: %s
-规则说明: %s
-
-## 判定提醒
-上述良性判定规则优先：EMB_001/EMB_002/EMB_003/EMB_004 与 DYN_001 均属良性用法，除非有确凿的窃取或外发敏感数据证据，否则必须判为 BENIGN。
-
-## 请回答
-1. verdict: MALICIOUS(恶意) / SUSPICIOUS(可疑) / BENIGN(正常) / UNCERTAIN(不确定)
-2. reason: 一句话说明理由（中文）
-3. risk: 如果恶意，数据会怎样被利用
-
-请严格按以下 JSON 格式回答，不要包含其他内容:
-{"verdict": "...", "reason": "...", "risk": "..."}
-`
-
 // OllamaBackendConfig configures the OllamaBackend adapter.
 type OllamaBackendConfig struct {
 	Endpoint     string
@@ -176,35 +133,26 @@ type ollamaGenerateResp struct {
 	Response string `json:"response"`
 }
 
-// rawDecision represents the parsed decision JSON fields.
-type rawDecision struct {
-	Verdict     string `json:"verdict"`
-	Reason      string `json:"reason"`
-	Risk        string `json:"risk"`
-	Remediation string `json:"remediation,omitempty"`
-}
-
-// HandleVerifyFinding converts a FindingPayload into a prompt, queries Ollama, and parses the response.
-func (b *OllamaBackend) HandleVerifyFinding(ctx context.Context, req *RequestEnvelope) (*ResponseEnvelope, error) {
-	if req == nil || req.FindingPayload == nil {
-		return &ResponseEnvelope{
+// Generate dispatches one prompt to Ollama.
+//
+// Options merge in order: the service's num_predict default, then the model
+// catalog's profile, then the request's own options. The request wins so a
+// caller can adjust generation without the service knowing why; the catalog
+// still owns the defaults so a caller that sends nothing gets the same
+// behaviour as before.
+func (b *OllamaBackend) Generate(ctx context.Context, req *GenerateRequest) (*GenerateResponse, error) {
+	if req == nil || strings.TrimSpace(req.Prompt) == "" {
+		return &GenerateResponse{
 			ProtocolVersion: CurrentProtocolVersion,
 			RequestID:       reqIDOrEmpty(req),
 			Status:          StatusInvalidRequest,
-			ErrorMessage:    "missing finding payload",
-		}, errors.New("missing finding payload")
+			ErrorMessage:    "prompt must not be empty",
+		}, errors.New("prompt must not be empty")
 	}
 
-	f := req.FindingPayload
-	prompt := fmt.Sprintf(findingAnalysisPromptTemplate,
-		f.Target.FilePath, f.Target.Line,
-		f.Target.ContextBefore, f.Target.CodeSnippet, f.Target.ContextAfter,
-		f.RuleID, f.Category, f.Severity, f.Description,
-	)
-
 	model := b.defaultModel
-	if req.ModelRef != nil && strings.TrimSpace(req.ModelRef.Name) != "" {
-		model = strings.TrimSpace(req.ModelRef.Name)
+	if strings.TrimSpace(req.Model) != "" {
+		model = strings.TrimSpace(req.Model)
 	}
 
 	genOptions := map[string]any{
@@ -217,30 +165,13 @@ func (b *OllamaBackend) HandleVerifyFinding(ctx context.Context, req *RequestEnv
 			}
 		}
 	}
-
-	// Deterministic decoding is a property of the audit, not of a model: the same
-	// finding has to yield the same verdict, because a verdict that drifts to
-	// MALICIOUS is what assist + failClosed turns into a blocked import, on code
-	// that never changed. Measured on the five real findings at 20 samples each,
-	// temperature 0.1 produced between 2 and 15 distinct completions per prompt;
-	// 0 produced exactly one.
-	//
-	// Set here, after the catalog merge, rather than in the catalog itself. The
-	// merge above copies a profile's options over this map, so a per-model
-	// temperature can silently re-randomise the audit - which is how the same 0.1
-	// came to be duplicated across the built-in catalog, the JSON catalog and this
-	// file, with only whichever one merged last actually mattering.
-	genOptions["temperature"] = 0.0
-	if req.Policy.Temperature != nil {
-		genOptions["temperature"] = *req.Policy.Temperature
-	}
-	if req.Policy.MaxCompletionTokens > 0 {
-		genOptions["num_predict"] = req.Policy.MaxCompletionTokens
+	for k, v := range req.Options {
+		genOptions[k] = v
 	}
 
 	ollamaReqBody := ollamaGenerateReq{
 		Model:   model,
-		Prompt:  prompt,
+		Prompt:  req.Prompt,
 		Stream:  false,
 		Options: genOptions,
 	}
@@ -272,73 +203,18 @@ func (b *OllamaBackend) HandleVerifyFinding(ctx context.Context, req *RequestEnv
 		return nil, fmt.Errorf("decode ollama response: %w", err)
 	}
 
-	parsed := parseDecisionJSON(genResp.Response)
-
-	return &ResponseEnvelope{
+	return &GenerateResponse{
 		ProtocolVersion: CurrentProtocolVersion,
 		RequestID:       req.RequestID,
 		Status:          StatusSuccess,
-		Decision: &DecisionResult{
-			Verdict:              parsed.Verdict,
-			Explanation:          parsed.Reason,
-			RiskLevel:            parsed.Risk,
-			SuggestedRemediation: parsed.Remediation,
-		},
-		EngineInfo: &EngineInfo{
-			Backend:     "ollama",
-			ModelLoaded: model,
-		},
+		Model:           model,
+		Text:            genResp.Response,
 	}, nil
 }
 
-func reqIDOrEmpty(req *RequestEnvelope) string {
+func reqIDOrEmpty(req *GenerateRequest) string {
 	if req != nil {
 		return req.RequestID
 	}
 	return ""
-}
-
-// parseDecisionJSON extracts and validates a decision JSON block from LLM output text.
-func parseDecisionJSON(raw string) rawDecision {
-	start := -1
-	end := -1
-	depth := 0
-	for i, ch := range raw {
-		switch ch {
-		case '{':
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				end = i + 1
-			}
-		}
-		if start >= 0 && end > start {
-			break
-		}
-	}
-	if start < 0 || end <= start {
-		return rawDecision{Verdict: VerdictUncertain, Reason: "unable to parse model JSON block"}
-	}
-
-	var decision rawDecision
-	if err := json.Unmarshal([]byte(raw[start:end]), &decision); err != nil {
-		return rawDecision{Verdict: VerdictUncertain, Reason: "malformed JSON in model response: " + err.Error()}
-	}
-
-	switch strings.ToUpper(strings.TrimSpace(decision.Verdict)) {
-	case VerdictMalicious:
-		decision.Verdict = VerdictMalicious
-	case VerdictSuspicious:
-		decision.Verdict = VerdictSuspicious
-	case VerdictBenign:
-		decision.Verdict = VerdictBenign
-	default:
-		decision.Verdict = VerdictUncertain
-	}
-
-	return decision
 }

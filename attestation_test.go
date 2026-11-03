@@ -33,7 +33,7 @@ func newAttestationServer(t *testing.T) *Server {
 			EvidenceProvider:              teetls.NewMockEvidenceProvider(),
 			InsecureSkipAttestationVerify: true,
 		},
-		Backend: &mockBackend{},
+		Backend: &stubBackend{},
 	})
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)

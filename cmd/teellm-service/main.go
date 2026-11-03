@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -127,32 +130,42 @@ func mergeConfigWithFlags(cfg *ServiceConfigFile, explicitFlags map[string]bool,
 	}
 }
 
-// probeContextTimeout bounds one readiness probe invocation.
+// probeHealthCheckTimeout is the budget one readiness probe attempt gets.
 //
-// It sits just above the client's health budget so that a backend that never
-// answers is reported as a health-check timeout rather than as an opaque
-// cancellation, and it is generous because /v1/llm/healthz loads the model on a cold
-// service: the probe deploys run is the very thing that warms it.
-const probeContextTimeout = teellm.DefaultHealthCheckTimeout + 10*time.Second
+// It is far longer than an ordinary request timeout because /v1/llm/healthz is
+// not a ping: the service answers it only once the model is loaded, which on a
+// cold service is seconds of disk and memory work. The probe deploys run is the
+// very thing that warms it, so the attempt is not retried: cutting it off
+// cancels the load it was waiting on, and the next attempt starts from nothing.
+const probeHealthCheckTimeout = 120 * time.Second
+
+// probeContextTimeout bounds one readiness probe invocation. It sits just above
+// the health budget so that a backend that never answers is reported as a
+// health-check timeout rather than as an opaque cancellation.
+const probeContextTimeout = probeHealthCheckTimeout + 10*time.Second
 
 func runProbe(ctx context.Context, endpoint string) error {
-	// No request Timeout: the probe only ever calls HealthCheck, whose budget is
-	// HealthCheckTimeout, and a short request timeout here would be a misleading
-	// no-op rather than a bound.
-	client, err := teellm.NewClient(teellm.Config{
-		Endpoint: endpoint,
-		TEETLS: &teetls.Config{
-			Mode:                          teetls.ModePermissive,
-			InsecureSkipAttestationVerify: true,
-		},
+	client := teetls.NewHTTPClient(&teetls.Config{
+		Mode:                          teetls.ModePermissive,
+		InsecureSkipAttestationVerify: true,
 	})
-	if err != nil {
-		return fmt.Errorf("create probe client: %w", err)
-	}
-	defer client.Close()
+	client.Timeout = probeHealthCheckTimeout
+	defer client.CloseIdleConnections()
 
-	if err := client.HealthCheck(ctx); err != nil {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+"/v1/llm/healthz", nil)
+	if err != nil {
+		return fmt.Errorf("create probe request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
 		return fmt.Errorf("probe healthcheck: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("probe healthcheck returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return nil
 }
