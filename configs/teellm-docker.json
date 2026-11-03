@@ -15,5 +15,11 @@
   "attestation": {
     "mode": "permissive",
     "mock": false
+  },
+  "platform": {
+    "addr": "",
+    "dockerId": "taa-teellm",
+    "heartbeatSeconds": 30,
+    "logFlushSeconds": 5
   }
 }

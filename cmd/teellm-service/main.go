@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/CipherSlinger/teellm"
+	"github.com/CipherSlinger/teellm/platformagent"
 	"github.com/CipherSlinger/teetls"
 )
 
@@ -40,11 +41,20 @@ type AttestationConfigSection struct {
 	HSKCEKCertPath string `json:"hskCekCertPath"`
 }
 
+// PlatformConfigSection defines the outbound platform reporting configuration.
+type PlatformConfigSection struct {
+	Addr             string `json:"addr"`
+	DockerID         string `json:"dockerId"`
+	HeartbeatSeconds int    `json:"heartbeatSeconds"`
+	LogFlushSeconds  int    `json:"logFlushSeconds"`
+}
+
 // ServiceConfigFile holds the complete JSON configuration structure for teellm-service.
 type ServiceConfigFile struct {
 	Server      ServerConfigSection      `json:"server"`
 	Backend     BackendConfigSection     `json:"backend"`
 	Attestation AttestationConfigSection `json:"attestation"`
+	Platform    PlatformConfigSection    `json:"platform"`
 }
 
 // loadServiceConfig loads service configuration from the given file path,
@@ -71,6 +81,11 @@ func loadServiceConfig(path string) (*ServiceConfigFile, error) {
 			// embedded PEK signature, so a stock deployment ships no vendor files.
 			// The fields remain for a peer that still checks the chain; -hrk and
 			// -hsk-cek supply them.
+		},
+		Platform: PlatformConfigSection{
+			DockerID:         "taa-teellm",
+			HeartbeatSeconds: platformagent.DefaultHeartbeatSeconds,
+			LogFlushSeconds:  platformagent.DefaultLogFlushSeconds,
 		},
 	}
 
@@ -189,18 +204,21 @@ func main() {
 	mergeConfigWithFlags(cfg, explicitFlags, addr, ollamaURL, model, hrkPath, hskCekPath, mockAttestation)
 
 	// Server mode
-	log.Printf("starting teellm-service daemon on %s (upstream=%s, model=%s)", cfg.Server.Addr, cfg.Backend.Endpoint, cfg.Backend.DefaultModel)
+	// The same buffer is shared by the service's own instrumentation and the
+	// reporter, so instrumented lines reach both stderr and the platform.
+	logs := platformagent.NewLogBuffer(platformagent.DefaultLogBufferSize)
+	logs.Add(platformagent.LevelInfo, "teellm", "starting teellm-service daemon on %s (upstream=%s, model=%s)", cfg.Server.Addr, cfg.Backend.Endpoint, cfg.Backend.DefaultModel)
 
 	// Determine evidence provider
 	var evidenceProvider teetls.EvidenceProvider
 	if cfg.Attestation.Mock {
-		log.Printf("using mock attestation provider (flag or config mock enabled)")
+		logs.Add(platformagent.LevelWarn, "teellm", "using mock attestation provider (flag or config mock enabled)")
 		evidenceProvider = teetls.NewMockEvidenceProvider()
 	} else if _, err := os.Stat("/dev/csv-guest"); err == nil {
-		log.Printf("detected /dev/csv-guest; using Hygon hardware evidence provider (hrk=%s, hsk_cek=%s)", cfg.Attestation.HRKCertPath, cfg.Attestation.HSKCEKCertPath)
+		logs.Add(platformagent.LevelInfo, "teellm", "detected /dev/csv-guest; using Hygon hardware evidence provider (hrk=%s, hsk_cek=%s)", cfg.Attestation.HRKCertPath, cfg.Attestation.HSKCEKCertPath)
 		evidenceProvider = teetls.NewHygonHardwareProvider("", cfg.Attestation.HRKCertPath, cfg.Attestation.HSKCEKCertPath)
 	} else {
-		log.Printf("warning: /dev/csv-guest not found; falling back to mock attestation provider for testing")
+		logs.Add(platformagent.LevelWarn, "teellm", "/dev/csv-guest not found; falling back to mock attestation provider for testing")
 		evidenceProvider = teetls.NewMockEvidenceProvider()
 	}
 
@@ -213,6 +231,20 @@ func main() {
 		Mode:                          attestationMode,
 		EvidenceProvider:              evidenceProvider,
 		InsecureSkipAttestationVerify: true,
+	}
+
+	agent, err := platformagent.New(platformagent.Config{
+		PlatformAddr:      cfg.Platform.Addr,
+		DockerID:          cfg.Platform.DockerID,
+		HeartbeatInterval: time.Duration(cfg.Platform.HeartbeatSeconds) * time.Second,
+		LogFlushInterval:  time.Duration(cfg.Platform.LogFlushSeconds) * time.Second,
+		Logs:              logs,
+		Snapshot: func(ctx context.Context) (*teellm.AttestationSnapshot, error) {
+			return teellm.BuildAttestationSnapshot(ctx, teeTLSConfig)
+		},
+	})
+	if err != nil {
+		log.Fatalf("failed to initialize platform agent: %v", err)
 	}
 
 	// A zero backend timeout means no deadline. It must not be replaced by a
@@ -237,6 +269,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to initialize Ollama backend: %v", err)
 	}
+	logs.Add(platformagent.LevelInfo, "teellm", "ollama backend ready: endpoint=%s model=%s", cfg.Backend.Endpoint, cfg.Backend.DefaultModel)
 
 	server, err := teellm.NewServer(teellm.ServerConfig{
 		Addr:    cfg.Server.Addr,
@@ -247,12 +280,23 @@ func main() {
 		log.Fatalf("failed to create teellm server: %v", err)
 	}
 
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	if agent != nil {
+		agent.Start(runCtx)
+		defer agent.Stop()
+		logs.Add(platformagent.LevelInfo, "teellm", "platform reporting enabled to %s", cfg.Platform.Addr)
+	} else {
+		logs.Add(platformagent.LevelInfo, "teellm", "platform reporting disabled (empty platform.addr)")
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	serverErrCh := make(chan error, 1)
 	go func() {
-		log.Printf("teellm-service listening on %s via RFC 8998 TEE-TLS 1.3", server.Addr())
+		logs.Add(platformagent.LevelInfo, "teellm", "teellm-service listening on %s via RFC 8998 TEE-TLS 1.3", server.Addr())
 		if err := server.Start(); err != nil {
 			serverErrCh <- err
 		}
@@ -260,7 +304,7 @@ func main() {
 
 	select {
 	case sig := <-sigCh:
-		log.Printf("received signal %v, shutting down teellm-service...", sig)
+		logs.Add(platformagent.LevelInfo, "teellm", "received signal %v, shutting down teellm-service", sig)
 		_ = server.Close()
 		log.Printf("teellm-service stopped cleanly")
 	case err := <-serverErrCh:
