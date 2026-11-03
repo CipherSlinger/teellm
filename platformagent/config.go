@@ -49,6 +49,8 @@ type Config struct {
 	// Logs is the shared buffer. When nil an internal one is created; the caller
 	// keeps a reference so it can instrument the service.
 	Logs *LogBuffer
+	// Snapshot supplies the attestation material each registration reports.
+	Snapshot SnapshotFunc
 	// HTTPClient overrides the client used for every call. Tests inject one.
 	HTTPClient *http.Client
 }
