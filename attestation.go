@@ -9,7 +9,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -157,9 +156,7 @@ type getAttestationRequest struct {
 }
 
 func writeAPIResponse(w http.ResponseWriter, status int, msg string, result any, errorCode int) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(apiResponse{Msg: msg, Result: result, Error: errorCode})
+	writeJSON(w, status, apiResponse{Msg: msg, Result: result, Error: errorCode})
 }
 
 // handleGetAttestation answers the platform on the TEE-TLS listener. The
@@ -173,13 +170,13 @@ func (s *Server) handleGetAttestation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, int64(MaxRequestPayloadBytes)+1))
+	body, err := readLimitedBody(r)
 	if err != nil {
-		writeAPIResponse(w, http.StatusBadRequest, "读取请求体失败", nil, http.StatusBadRequest)
-		return
-	}
-	if len(body) > MaxRequestPayloadBytes {
-		writeAPIResponse(w, http.StatusRequestEntityTooLarge, "请求体超过 1MB 限制", nil, http.StatusRequestEntityTooLarge)
+		if errors.Is(err, errRequestBodyTooLarge) {
+			writeAPIResponse(w, http.StatusRequestEntityTooLarge, "请求体超过 1MB 限制", nil, http.StatusRequestEntityTooLarge)
+		} else {
+			writeAPIResponse(w, http.StatusBadRequest, "读取请求体失败", nil, http.StatusBadRequest)
+		}
 		return
 	}
 

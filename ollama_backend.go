@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -85,36 +86,15 @@ func (b *OllamaBackend) HandleHealthCheck(ctx context.Context) error {
 		return fmt.Errorf("ollama health check returned status %d", resp.StatusCode)
 	}
 
-	// Active inference probe: verify that model tensor weights can actually be mapped and loaded.
-	if b.defaultModel != "" {
-		probePayload, err := json.Marshal(ollamaGenerateReq{
-			Model:  b.defaultModel,
-			Prompt: "ping",
-			Stream: false,
-			Options: map[string]any{
-				"num_predict": 1,
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("marshal ollama health check probe: %w", err)
-		}
-
-		genReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.endpoint+"/api/generate", bytes.NewReader(probePayload))
-		if err != nil {
-			return fmt.Errorf("create ollama generate probe request: %w", err)
-		}
-		genReq.Header.Set("Content-Type", "application/json")
-
-		genResp, err := b.client.Do(genReq)
-		if err != nil {
-			return fmt.Errorf("ollama model %q inference check failed: %w", b.defaultModel, err)
-		}
-		defer genResp.Body.Close()
-
-		if genResp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(genResp.Body)
-			return fmt.Errorf("ollama model %q inference check returned status %d: %s", b.defaultModel, genResp.StatusCode, strings.TrimSpace(string(body)))
-		}
+	// Active inference probe: dispatch a one-token generation through the same
+	// path as any other request, so a model whose weights cannot be mapped
+	// fails readiness here rather than on the first real prompt.
+	if _, err := b.Generate(ctx, &GenerateRequest{
+		ProtocolVersion: CurrentProtocolVersion,
+		Prompt:          "ping",
+		Options:         map[string]any{"num_predict": 1},
+	}); err != nil {
+		return fmt.Errorf("ollama model %q inference check failed: %w", b.defaultModel, err)
 	}
 
 	return nil
@@ -137,9 +117,9 @@ type ollamaGenerateResp struct {
 //
 // Options merge in order: the service's num_predict default, then the model
 // catalog's profile, then the request's own options. The request wins so a
-// caller can adjust generation without the service knowing why; the catalog
-// still owns the defaults so a caller that sends nothing gets the same
-// behaviour as before.
+// caller can adjust generation without the service knowing why. Sampling is
+// the caller's concern: this gateway no longer pins temperature, so a request
+// that sends none is decoded with whatever Ollama defaults to.
 func (b *OllamaBackend) Generate(ctx context.Context, req *GenerateRequest) (*GenerateResponse, error) {
 	if req == nil || strings.TrimSpace(req.Prompt) == "" {
 		return &GenerateResponse{
@@ -158,16 +138,10 @@ func (b *OllamaBackend) Generate(ctx context.Context, req *GenerateRequest) (*Ge
 	genOptions := map[string]any{
 		"num_predict": 200,
 	}
-	if b.catalog != nil {
-		if profile := b.catalog.GetProfile(model); profile != nil && len(profile.Options) > 0 {
-			for k, v := range profile.Options {
-				genOptions[k] = v
-			}
-		}
+	if profile := b.catalog.GetProfile(model); profile != nil {
+		maps.Copy(genOptions, profile.Options)
 	}
-	for k, v := range req.Options {
-		genOptions[k] = v
-	}
+	maps.Copy(genOptions, req.Options)
 
 	ollamaReqBody := ollamaGenerateReq{
 		Model:   model,

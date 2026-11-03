@@ -70,6 +70,24 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return s, nil
 }
 
+// errRequestBodyTooLarge reports that a request body exceeded
+// MaxRequestPayloadBytes.
+var errRequestBodyTooLarge = errors.New("request body exceeds 1MB limit")
+
+// readLimitedBody reads at most MaxRequestPayloadBytes from the request body.
+// Callers own the response shape, so the failure is returned rather than
+// written here.
+func readLimitedBody(r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(MaxRequestPayloadBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > MaxRequestPayloadBytes {
+		return nil, errRequestBodyTooLarge
+	}
+	return body, nil
+}
+
 // handleGenerate handles POST /v1/llm/generate.
 func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -77,17 +95,19 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limited := io.LimitReader(r.Body, int64(MaxRequestPayloadBytes)+1)
-	body, err := io.ReadAll(limited)
+	body, err := readLimitedBody(r)
 	if err != nil {
-		http.Error(w, "read request body error", http.StatusBadRequest)
-		return
-	}
-	if len(body) > MaxRequestPayloadBytes {
-		writeJSON(w, http.StatusRequestEntityTooLarge, &GenerateResponse{
+		status := http.StatusBadRequest
+		if errors.Is(err, errRequestBodyTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+			err = errRequestBodyTooLarge
+		} else {
+			err = fmt.Errorf("read request body error: %w", err)
+		}
+		writeJSON(w, status, &GenerateResponse{
 			ProtocolVersion: CurrentProtocolVersion,
 			Status:          StatusInvalidRequest,
-			ErrorMessage:    "request body exceeds 1MB limit",
+			ErrorMessage:    err.Error(),
 		})
 		return
 	}
