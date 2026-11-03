@@ -230,6 +230,42 @@ go build -o bin/teellm-service ./cmd/teellm-service
 | `-mock-attestation`| `false` | Force mock attestation provider (for dev/CI) |
 | `-probe` | `""` | Target HTTPS URL to probe for readiness and exit |
 
+### HTTP Surface
+
+All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
+
+| Path | Method | Purpose |
+|------|--------|---------|
+| `/v1/llm/verify` | POST | Finding verification |
+| `/v1/llm/healthz` | GET | Readiness |
+| `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
+
+`/v1/llm/getAttestation` is mounted on the same TEE-TLS listener as the other
+two, so a plain HTTP client cannot call it: the platform must speak ShangMi TLS
+(RFC 8998). The response still carries `certificate` in PEM so the caller can
+check `SM3(certificate public key) == userdata[:32]` against the report it just
+received, instead of relying on whichever certificate the handshake served.
+
+### Platform Reporting
+
+Set `platform.addr` to enable outbound plaintext JSON reporting to the control
+platform. The instance registers once at startup (retrying with backoff until it
+succeeds -- it never gives up), sends a liveness heartbeat every
+`heartbeatSeconds`, and pushes buffered logs every `logFlushSeconds`. If a
+heartbeat or a log push fails because the platform cannot be reached at all, the
+instance registers again; there is no periodic re-registration. An empty
+`platform.addr` disables all three outbound channels; `getAttestation` stays
+mounted either way because it is part of the TEE-TLS surface.
+
+```json
+"platform": {
+  "addr": "http://172.16.10.181:18081",
+  "dockerId": "taa-teellm",
+  "heartbeatSeconds": 30,
+  "logFlushSeconds": 5
+}
+```
+
 ### Starting the Service
 
 1. **Production Mode (with Hardware Attestation)**:
