@@ -60,6 +60,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/llm/verify", s.handleVerify)
 	mux.HandleFunc("/v1/llm/healthz", s.handleHealthz)
+	mux.HandleFunc("/v1/llm/getAttestation", s.handleGetAttestation)
 
 	s.httpSrv = &http.Server{
 		Handler: mux,
