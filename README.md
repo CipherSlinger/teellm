@@ -5,7 +5,7 @@
 
 `teellm` provides confidential AI inference over RFC 8998 ShangMi (SM2/SM3/SM4) TEE-TLS 1.3 channels. It runs inside a hardware-isolated Trusted Execution Environment (TEE) and turns a prompt into the model's raw text.
 
-The project combines hardware-rooted remote attestation (Hygon CSV, AMD SEV and Intel SGX evidence formats, verified through `teetls`) with a thin inference gateway in front of a local Ollama daemon. The gateway is deliberately task-agnostic: prompts, sampling options and the interpretation of the model's output all belong to the caller.
+The project combines hardware-rooted remote attestation (Hygon CSV evidence, verified through `teetls`) with a thin inference gateway in front of a local Ollama daemon. The gateway is deliberately task-agnostic: prompts, sampling options and the interpretation of the model's output all belong to the caller.
 
 ---
 
@@ -44,7 +44,7 @@ The project combines hardware-rooted remote attestation (Hygon CSV, AMD SEV and 
  |   +-----------------------------------------------------+   |
  |   |                    teetls Client                    |   |
  |   |  - TLS 1.3 SM2/SM3/SM4 (RFC 8998)                   |   |
- |   |  - Attestation Evidence Verifier (CSV / SEV / SGX)  |   |
+ |   |  - Attestation Evidence Verifier (Hygon CSV)        |   |
  |   +-----------------------------------------------------+   |
  +------------------------------|------------------------------+
                                 |
@@ -71,7 +71,7 @@ The project combines hardware-rooted remote attestation (Hygon CSV, AMD SEV and 
  |                              |                              |
  |                              v                              |
  |   +-----------------------------------------------------+   |
- |   |                 OllamaBackendAdapter                |   |
+ |   |                 OllamaBackend                       |   |
  |   |  - Options Merge / Ollama Dispatch                  |   |
  |   +-----------------------------------------------------+   |
  |                              |                              |
@@ -95,11 +95,19 @@ teellm/
 │   └── teellm-service/     # Standalone microservice daemon CLI
 │       ├── main.go         # Entrypoint with flags, probe mode, and signals
 │       └── main_test.go    # Config, flag and probe mode tests
+├── configs/                # JSON configuration for the daemon
+│   ├── models.json
+│   ├── teellm-docker.json
+│   └── teellm-production.json
+├── deploy/                 # Deployment scripts
+│   └── start.sh
 ├── go.mod                  # Go module definition (go 1.22)
 ├── go.sum                  # Dependency checksums
 ├── LICENSE                 # Apache-2.0 License
 ├── model_catalog.go        # Model profiles and per-model option defaults
 ├── model_catalog_test.go   # Catalog loading and fallback tests
+├── models/                 # Offline Ollama runtime and model store
+│   └── ollama/
 ├── ollama_backend.go       # Backend adapter dispatching to Ollama
 ├── ollama_backend_test.go  # Option merge and health check tests
 ├── platformagent/          # Outbound registration, heartbeat and log reporting
@@ -127,7 +135,7 @@ All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
 | Path | Method | Purpose |
 |------|--------|---------|
 | `/v1/llm/generate` | POST | Generic inference: prompt in, raw text out |
-| `/v1/llm/healthz` | GET | Readiness |
+| `/v1/llm/healthz` | GET | Readiness: runs a one-token inference on the default model, so a cold or not-yet-loaded model answers 503 |
 | `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
 
 The service knows nothing about the caller's task. Sampling options
@@ -149,11 +157,13 @@ Request and response:
 - Options merge in this order: the service's `num_predict` default, then the
   model catalog's profile for the chosen model, then the request's own
   `options`. The request wins.
-- Failures return the same envelope with `status` and `errorMessage` set. The
-  protocol defines `INVALID_REQUEST`, `MODEL_NOT_FOUND`, `INTERNAL_ERROR` and
-  `SERVICE_UNAVAILABLE`; the service currently emits `INVALID_REQUEST` for
-  malformed JSON, an empty prompt or a body over 1MB, and `INTERNAL_ERROR` when
-  the backend fails.
+- Application-level failures return the same envelope with `status` and
+  `errorMessage` set. The protocol defines `INVALID_REQUEST`, `MODEL_NOT_FOUND`,
+  `INTERNAL_ERROR` and `SERVICE_UNAVAILABLE`; the service currently emits
+  `INVALID_REQUEST` for malformed JSON, an empty prompt or a body over 1MB, and
+  `INTERNAL_ERROR` when the backend fails. Two earlier checks bypass the
+  envelope: a non-POST method and an unreadable request body return plain-text
+  `http.Error` responses (405 and 400 respectively).
 
 There is no client SDK: callers use `teetls.NewHTTPClient` and POST JSON
 directly.
@@ -218,6 +228,7 @@ go build -o bin/teellm-service ./cmd/teellm-service
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `-config` | `""` | Path to a JSON configuration file (model catalog, platform reporting, backend) |
 | `-addr` | `:8443` | TCP address to listen on |
 | `-ollama-url` | `http://127.0.0.1:11434` | Upstream Ollama HTTP endpoint |
 | `-model` | `qwen2.5-coder:3b` | Default model used for inference |
@@ -233,7 +244,7 @@ All three endpoints share the single TEE-TLS 1.3 listener on `:8443`.
 | Path | Method | Purpose |
 |------|--------|---------|
 | `/v1/llm/generate` | POST | Generic inference: prompt in, raw text out |
-| `/v1/llm/healthz` | GET | Readiness |
+| `/v1/llm/healthz` | GET | Readiness: runs a one-token inference on the default model, so a cold or not-yet-loaded model answers 503 |
 | `/v1/llm/getAttestation` | POST | Platform fetches the CSV report and the certificate it is bound to |
 
 `/v1/llm/getAttestation` is mounted on the same TEE-TLS listener as the other
@@ -241,6 +252,7 @@ two, so a plain HTTP client cannot call it: the platform must speak ShangMi TLS
 (RFC 8998). The response still carries `certificate` in PEM so the caller can
 check `SM3(certificate public key) == userdata[:32]` against the report it just
 received, instead of relying on whichever certificate the handshake served.
+Requests with an empty `requestId` are rejected with 400.
 
 ### Platform Reporting
 
