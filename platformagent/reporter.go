@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 // logEntry is one run-log record in the shape TAA reports.
@@ -52,6 +54,10 @@ type Agent struct {
 	// registration loop. Buffered with capacity 1: the signal means "register
 	// again", so while one is already pending or being acted on, more add nothing.
 	reregister chan struct{}
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	startOnce  sync.Once
+	stopOnce   sync.Once
 }
 
 // New builds an Agent. A Config with an empty PlatformAddr yields (nil, nil):
@@ -255,5 +261,157 @@ func (a *Agent) flushLogs(ctx context.Context) {
 			a.pending = append([]logEntry(nil), a.pending[size:]...)
 		}
 		a.mu.Unlock()
+	}
+}
+
+// Start launches the registration, heartbeat and log-flush loops. It is safe to
+// call once; a disabled agent (nil) is a no-op.
+func (a *Agent) Start(ctx context.Context) {
+	if a == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	a.startOnce.Do(func() {
+		runCtx, cancel := context.WithCancel(ctx)
+		a.cancel = cancel
+		a.wg.Add(3)
+		go a.registerLoop(runCtx)
+		go a.heartbeatLoop(runCtx)
+		go a.logLoop(runCtx)
+	})
+}
+
+// Stop cancels the loops, waits for them, and makes one last best-effort flush
+// so records produced during shutdown still reach the platform.
+func (a *Agent) Stop() {
+	if a == nil {
+		return
+	}
+	a.stopOnce.Do(func() {
+		if a.cancel != nil {
+			a.cancel()
+		}
+		a.wg.Wait()
+
+		flushCtx, cancel := context.WithTimeout(context.Background(), DefaultRequestTimeout)
+		defer cancel()
+		a.flushLogs(flushCtx)
+	})
+}
+
+// registerLoop registers, retrying for as long as it takes, and then registers
+// again whenever a probe reports that the platform became unreachable.
+func (a *Agent) registerLoop(ctx context.Context) {
+	defer a.wg.Done()
+
+	if err := a.registerUntilSuccess(ctx); err != nil {
+		return
+	}
+	a.logs.Add(LevelInfo, "platform", "registered with %s as %s", a.cfg.PlatformAddr, a.cfg.DockerID)
+	close(a.registered)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.reregister:
+			// A reachability failure means the platform may have restarted or
+			// lost the record, and the certificate this process presents may have
+			// rotated since the last registration. Register again; the ladder
+			// keeps trying until it sticks.
+			a.logs.Add(LevelInfo, "platform", "platform became unreachable, registering again")
+			if err := a.registerUntilSuccess(ctx); err != nil {
+				return
+			}
+			a.logs.Add(LevelInfo, "platform", "re-registered with %s as %s", a.cfg.PlatformAddr, a.cfg.DockerID)
+		}
+	}
+}
+
+// registerUntilSuccess attempts registration on the retry ladder until it
+// succeeds or ctx is cancelled. It returns nil only on success.
+//
+// The ladder has no give-up window. Registration is what makes this instance
+// exist on the platform: a bounded window would mean that any platform outage
+// longer than the window leaves a perfectly healthy inference service
+// permanently invisible -- no record, heartbeats blocked on the registration
+// signal, logs undeliverable -- with no way back short of restarting the pod.
+// TAA bounds its own retry for a different reason (its log lives on the guest's
+// tmpfs and every attempt carries the full attestation payload); here the
+// payload is small and the logging is throttled, so nothing accumulates.
+func (a *Agent) registerUntilSuccess(ctx context.Context) error {
+	delay := registerRetryInitialDelay
+	for attempt := 1; ; attempt++ {
+		err := a.registerOnce(ctx)
+		if err == nil {
+			a.reportSuccess("register")
+			return nil
+		}
+		a.reportFailure("register", err)
+		if attempt == 1 || attempt%registerFailureLogEvery == 0 {
+			log.Printf("[WARN] [platform] register attempt %d failed, retrying in %s: %v", attempt, delay, err)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+		if delay > registerRetryMaxDelay {
+			delay = registerRetryMaxDelay
+		}
+	}
+}
+
+// heartbeatLoop starts only after registration, so a heartbeat always refers to
+// an instance the platform already knows.
+func (a *Agent) heartbeatLoop(ctx context.Context) {
+	defer a.wg.Done()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-a.registered:
+	}
+
+	if err := a.sendHeartbeat(ctx); err != nil {
+		a.reportFailure("heartbeat", err)
+	} else {
+		a.reportSuccess("heartbeat")
+	}
+
+	ticker := time.NewTicker(a.cfg.HeartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := a.sendHeartbeat(ctx); err != nil {
+				a.reportFailure("heartbeat", err)
+			} else {
+				a.reportSuccess("heartbeat")
+			}
+		}
+	}
+}
+
+// logLoop pushes the ring on a fixed period. It is independent of registration:
+// logs are worth keeping even while the registration is still being retried.
+func (a *Agent) logLoop(ctx context.Context) {
+	defer a.wg.Done()
+
+	ticker := time.NewTicker(a.cfg.LogFlushInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.flushLogs(ctx)
+		}
 	}
 }
