@@ -61,6 +61,11 @@ func TestLoadServiceConfigDefault(t *testing.T) {
 	if cfg.Attestation.Mode != "permissive" || cfg.Attestation.Mock {
 		t.Errorf("expected permissive non-mock attestation, got mode=%s mock=%v", cfg.Attestation.Mode, cfg.Attestation.Mock)
 	}
+	// The shipped configuration names no vendor certificates; a non-empty default
+	// would make the hardware provider fail to read the chain at every handshake.
+	if cfg.Attestation.HRKCertPath != "" || cfg.Attestation.HSKCEKCertPath != "" {
+		t.Errorf("expected empty default certificate paths, got hrk=%q hsk=%q", cfg.Attestation.HRKCertPath, cfg.Attestation.HSKCEKCertPath)
+	}
 }
 
 func TestMergeConfigWithFlags(t *testing.T) {

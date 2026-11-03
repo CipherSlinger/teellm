@@ -64,10 +64,13 @@ func loadServiceConfig(path string) (*ServiceConfigFile, error) {
 			TimeoutSeconds: 60,
 		},
 		Attestation: AttestationConfigSection{
-			Mode:           "permissive",
-			Mock:           false,
-			HRKCertPath:    "/root/taa/certs/hrk.cert",
-			HSKCEKCertPath: "/root/taa/certs/hsk_cek.cert",
+			Mode: "permissive",
+			Mock: false,
+			// Certificate paths stay empty by default: the service only relays the
+			// chain it is given to its peer, and TAA verifies just the report's
+			// embedded PEK signature, so a stock deployment ships no vendor files.
+			// The fields remain for a peer that still checks the chain; -hrk and
+			// -hsk-cek supply them.
 		},
 	}
 

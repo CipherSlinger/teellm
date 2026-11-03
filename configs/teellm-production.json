@@ -14,8 +14,6 @@
   },
   "attestation": {
     "mode": "strict",
-    "mock": false,
-    "hrkCertPath": "/opt/teellm/certs/hrk.cert",
-    "hskCekCertPath": "/opt/teellm/certs/hsk_cek.cert"
+    "mock": false
   }
 }
